@@ -454,6 +454,9 @@ services:
       NP_PII_KEK_FILE: /run/secrets/kek_compliance
       NP_SCREENING_VENDOR: ${NP_SCREENING_VENDOR:-none}
       NP_KYB_VENDOR: ${NP_KYB_VENDOR:-manual}
+      # OFAC SDN list: downloaded on the worker's first start and daily at 03:00 UTC (SP-15); set false
+      # offline and load a file with `ops.js sanctions-import - < SDN_ADVANCED.XML`.
+      NP_SANCTIONS_REFRESH: ${NP_SANCTIONS_REFRESH:-true}
     secrets: [db_url_compliance, service_client_compliance, kek_compliance]
     networks: [internal, data, egress]
     depends_on:
