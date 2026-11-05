@@ -1,11 +1,11 @@
 # AGENTS.md — nearpay-deploy
 
-You are working in **nearpay-deploy**, one of 26 NearPay repositories (`nearpay-brain/architecture/repositories.md`).
-Scope: Desired state of every cluster: Argo CD applications, the shared service Helm chart, platform components, per-environment overlays, SOPS-encrypted config.
+You are working in **nearpay-deploy**, one of 27 NearPay repositories (`nearpay-brain/architecture/repositories.md`).
+Scope: Desired runtime state. v1: the Docker Compose stack (profiles local/server/observability), Postgres init, Traefik config, env templates, deploy script and SOPS-encrypted secrets. Post-v1: Argo CD applications, Helm chart, platform components, per-environment overlays.
 
 ## Before changing anything
 
-1. Read `../nearpay-brain/AGENTS.md`, then the docs listed in this repo's README.
+1. Read `../nearpay-brain/AGENTS.md`, then this repo's LLD (`../nearpay-brain/lld/platform.md`) — it is the implementation spec; do not make design decisions it already makes.
 2. Contracts (requests, responses, events, errors) come from `@nearpay/spec`. If one must change, open a PR in `nearpay-spec` first; never hand-write contract types here.
 3. Check your change against invariants INV-1…INV-9 in `nearpay-brain/product/requirements.md`.
 
