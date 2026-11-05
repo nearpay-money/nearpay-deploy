@@ -533,6 +533,8 @@ services:
       NP_SMTP_URL: ${NP_SMTP_URL:-smtp://mailpit:1025}
       NP_FROM: ${NP_FROM:-NearPay <no-reply@nearpay.money>}
       NP_SECURITY_CONTACTS: ${NP_SECURITY_CONTACTS:-}
+      # customer receipts for test-mode payments: on locally (Mailpit catches every mail), off on servers
+      NP_TEST_MODE_RECEIPTS: ${NP_TEST_MODE_RECEIPTS:-true}
     secrets: [db_url_notify, service_client_notify, kek_notify]
     networks: [internal, data, egress]
     depends_on:
