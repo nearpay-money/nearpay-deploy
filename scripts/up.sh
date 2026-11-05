@@ -19,7 +19,7 @@ secrets="$deploy/.secrets"
 env_file="$compose_dir/env/local.env"
 
 SERVICES=(identity payments rails agentpay compliance webhooks notify sandbox sentinel billing)
-SITES=(pay:nearpay-checkout js:nearpay-js dashboard:nearpay-dashboard ops:nearpay-console docs:nearpay-docs)
+SITES=(pay:nearpay-checkout/dist js:nearpay-js/dist dashboard:nearpay-dashboard/dist ops:nearpay-console/dist docs:nearpay-site/dist/docs)
 
 say() { printf '%s\n' "$*"; }
 die() { printf 'up: %s\n' "$*" >&2; exit 1; }
@@ -64,12 +64,12 @@ registry_port="${NP_REGISTRY_PORT:-$(envval NP_REGISTRY_PORT)}"
 registry_port="${registry_port:-4873}"
 registry="http://127.0.0.1:$registry_port"
 
-# Static sites: a repository's dist/ when it exists, otherwise the placeholder page.
+# Static sites: a repository's build output when it exists, otherwise the placeholder page.
 for entry in "${SITES[@]}"; do
-  site="${entry%%:*}" repo="${entry#*:}"
+  site="${entry%%:*}" build_dir="$work/${entry#*:}"
   var="NP_SITE_$(printf '%s' "$site" | tr '[:lower:]' '[:upper:]')"
-  if [ -f "$work/$repo/dist/index.html" ] || { [ "$site" = js ] && [ -d "$work/$repo/dist/v1" ]; }; then
-    export "$var=$work/$repo/dist"
+  if [ -f "$build_dir/index.html" ] || { [ "$site" = js ] && [ -d "$build_dir/v1" ]; }; then
+    export "$var=$build_dir"
   else
     export "$var=$compose_dir/static/placeholder"
   fi
