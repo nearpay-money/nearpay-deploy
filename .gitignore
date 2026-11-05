@@ -1,0 +1,11 @@
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfvars
+!*.tfvars.example
+.env
+.env.*
+!.env.example
+*.retry
+*.dec.*
+.DS_Store
