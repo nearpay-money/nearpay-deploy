@@ -1,0 +1,641 @@
+# NearPay v1 stack (lld/platform.md §1, ADR-0015): networks, volumes, secrets, platform services and
+# every NearPay service. Profile-independent: compose.local.yaml adds build contexts, local ports and
+# hostnames, the package registry, Mailpit and the merchant demo. Run it with scripts/up.sh.
+#
+# Services carry a Compose profile named after their repository (identity, payments, …); up.sh
+# enables a profile once ../nearpay-<svc>/Dockerfile exists, so the platform always starts and each
+# service joins as soon as it is built. Images run `node dist/main.js <process>` and define their own
+# HEALTHCHECK (`dist/main.js healthcheck`, @nearpay-internal/service).
+name: nearpay
+
+x-logging: &logging
+  driver: json-file
+  options: { max-size: 10m, max-file: "3" }
+
+# Hardening shared by every NearPay container (foundations §15).
+x-node-service: &node-service
+  restart: unless-stopped
+  init: true
+  read_only: true
+  tmpfs: [/tmp]
+  user: "10001:10001"
+  cap_drop: [ALL]
+  security_opt: [no-new-privileges:true]
+  stop_grace_period: 35s # the service drains for up to 30 s
+  logging: *logging
+
+# One-shot migrators (`migrate-<svc>`): migrator role, data network only.
+x-migrate: &migrate
+  <<: *node-service
+  restart: "no"
+  command: [dist/main.js, migrate]
+  networks: [data]
+  depends_on:
+    postgres-init: { condition: service_completed_successfully }
+
+# Wiring every service shares (foundations §13); tunables keep the defaults in each service's LLD.
+x-env: &env
+  NP_ENV: ${NP_ENV:-local}
+  NP_LOG_LEVEL: ${NP_LOG_LEVEL:-info}
+  NP_OTEL_ENDPOINT: ${NP_OTEL_ENDPOINT:-}
+  NP_NATS_URL: nats://nats:4222
+  NP_VALKEY_URL: redis://valkey:6379
+  NP_JWKS_URL: http://identity-api:8080/internal/jwks
+  NP_IDENTITY_URL: http://identity-api:8080
+  NP_PAYMENTS_URL: http://payments-api:8080
+  NP_RAILS_URL: http://rails-api:8080
+  NP_AGENTPAY_URL: http://agentpay-api:8080
+  NP_COMPLIANCE_URL: http://compliance-api:8080
+  NP_WEBHOOKS_URL: http://webhooks-api:8080
+  NP_NOTIFY_URL: http://notify-api:8080
+  NP_BILLING_URL: http://billing-api:8080
+  NP_SENTINEL_URL: http://sentinel-api:8080
+  NP_SANDBOX_BASE_URL: http://sandbox-api:8080
+  NP_PUBLIC_API_URL: https://api.${NP_BASE_DOMAIN:-nearpay.localhost}${NP_PORT_SUFFIX:-}
+  NP_PAY_ORIGIN: https://pay.${NP_BASE_DOMAIN:-nearpay.localhost}${NP_PORT_SUFFIX:-}
+  NP_DASHBOARD_ORIGIN: https://dashboard.${NP_BASE_DOMAIN:-nearpay.localhost}${NP_PORT_SUFFIX:-}
+
+x-chain-env: &chain-env
+  NP_NEAR_RPC_URLS: ${NP_NEAR_RPC_URLS:-https://rpc.mainnet.near.org,https://free.rpc.fastnear.com}
+  NP_INTENTS_CONTRACT: ${NP_INTENTS_CONTRACT:-intents.near}
+  NP_TREASURY_ACCOUNT: ${NP_TREASURY_ACCOUNT:-}
+  NP_ONECLICK_BASE_URL: ${NP_ONECLICK_BASE_URL:-https://1click.chaindefuser.com}
+  NP_SANDBOX_SIGNING_PUBKEY: ${NP_SANDBOX_SIGNING_PUBKEY:?run scripts/seed.sh keys}
+
+networks:
+  edge: {} # traefik and the static file server; the only network with published ports
+  internal: { internal: true } # every service; no internet
+  data: { internal: true } # postgres, nats, valkey and their clients
+  egress: {} # only containers that call the internet
+
+volumes:
+  pgdata: {}
+  natsdata: {}
+  valkeydata: {}
+  billing-invoices: {}
+
+secrets:
+  postgres_password: { file: ../.secrets/postgres_password }
+  db_url_identity: { file: ../.secrets/db_url_identity }
+  db_url_payments: { file: ../.secrets/db_url_payments }
+  db_url_billing: { file: ../.secrets/db_url_billing }
+  db_url_rails: { file: ../.secrets/db_url_rails }
+  db_url_agentpay: { file: ../.secrets/db_url_agentpay }
+  db_url_compliance: { file: ../.secrets/db_url_compliance }
+  db_url_webhooks: { file: ../.secrets/db_url_webhooks }
+  db_url_notify: { file: ../.secrets/db_url_notify }
+  db_url_sandbox: { file: ../.secrets/db_url_sandbox }
+  db_url_sentinel: { file: ../.secrets/db_url_sentinel }
+  db_migrate_url_identity: { file: ../.secrets/db_migrate_url_identity }
+  db_migrate_url_payments: { file: ../.secrets/db_migrate_url_payments }
+  db_migrate_url_billing: { file: ../.secrets/db_migrate_url_billing }
+  db_migrate_url_rails: { file: ../.secrets/db_migrate_url_rails }
+  db_migrate_url_agentpay: { file: ../.secrets/db_migrate_url_agentpay }
+  db_migrate_url_compliance: { file: ../.secrets/db_migrate_url_compliance }
+  db_migrate_url_webhooks: { file: ../.secrets/db_migrate_url_webhooks }
+  db_migrate_url_notify: { file: ../.secrets/db_migrate_url_notify }
+  db_migrate_url_sandbox: { file: ../.secrets/db_migrate_url_sandbox }
+  db_migrate_url_sentinel: { file: ../.secrets/db_migrate_url_sentinel }
+  db_registry_url_sentinel: { file: ../.secrets/db_registry_url_sentinel }
+  service_client_identity: { file: ../.secrets/service_client_identity }
+  service_client_payments: { file: ../.secrets/service_client_payments }
+  service_client_billing: { file: ../.secrets/service_client_billing }
+  service_client_rails: { file: ../.secrets/service_client_rails }
+  service_client_agentpay: { file: ../.secrets/service_client_agentpay }
+  service_client_compliance: { file: ../.secrets/service_client_compliance }
+  service_client_webhooks: { file: ../.secrets/service_client_webhooks }
+  service_client_notify: { file: ../.secrets/service_client_notify }
+  service_client_sandbox: { file: ../.secrets/service_client_sandbox }
+  service_client_sentinel: { file: ../.secrets/service_client_sentinel }
+  service_clients: { file: ../.secrets/service_clients.json }
+  kek_identity: { file: ../.secrets/kek_identity }
+  kek_payments: { file: ../.secrets/kek_payments }
+  kek_billing: { file: ../.secrets/kek_billing }
+  kek_rails: { file: ../.secrets/kek_rails }
+  kek_agentpay: { file: ../.secrets/kek_agentpay }
+  kek_compliance: { file: ../.secrets/kek_compliance }
+  kek_webhooks: { file: ../.secrets/kek_webhooks }
+  kek_notify: { file: ../.secrets/kek_notify }
+  kek_sandbox: { file: ../.secrets/kek_sandbox }
+  kek_sentinel: { file: ../.secrets/kek_sentinel }
+  jwt_current: { file: ../.secrets/jwt/current.pem }
+  jwt_next: { file: ../.secrets/jwt/next.pem }
+  sentinel_signing_key: { file: ../.secrets/sentinel_signing_key.pem }
+  payments_ticket_key: { file: ../.secrets/payments_ticket_key.pem }
+  webhook_signing_key: { file: ../.secrets/webhook_signing_key.pem }
+  sandbox_signing_key: { file: ../.secrets/sandbox_signing_key.pem }
+  turnstile_secret: { file: ../.secrets/turnstile_secret }
+
+services:
+  # ------------------------------------------------------------------------------------------
+  # Platform
+  # ------------------------------------------------------------------------------------------
+  traefik:
+    image: traefik:v3.5.6
+    restart: unless-stopped
+    user: "65532:65532"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    sysctls: { net.ipv4.ip_unprivileged_port_start: "0" } # bind :80/:443 without root
+    environment:
+      NP_BASE_DOMAIN: ${NP_BASE_DOMAIN:-nearpay.localhost}
+    volumes:
+      - ./traefik/traefik.yaml:/etc/traefik/traefik.yaml:ro
+      - ./traefik/dynamic:/etc/traefik/dynamic:ro
+      - ../.secrets/tls:/certs:ro
+    networks:
+      edge: {}
+      internal:
+        aliases: # containers reach the public hostnames through the gateway too
+          - api.${NP_BASE_DOMAIN:-nearpay.localhost}
+          - pay.${NP_BASE_DOMAIN:-nearpay.localhost}
+          - js.${NP_BASE_DOMAIN:-nearpay.localhost}
+          - dashboard.${NP_BASE_DOMAIN:-nearpay.localhost}
+    healthcheck:
+      test: [CMD, traefik, healthcheck, --ping]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+    logging: *logging
+
+  static:
+    image: nginxinc/nginx-unprivileged:1.29.8-alpine
+    restart: unless-stopped
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    volumes:
+      - ./static/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./static/headers.conf:/etc/nginx/snippets/headers.conf:ro
+      - ${NP_SITE_PAY:-./static/placeholder}:/sites/pay:ro
+      - ${NP_SITE_JS:-./static/placeholder}:/sites/js:ro
+      - ${NP_SITE_DASHBOARD:-./static/placeholder}:/sites/dashboard:ro
+      - ${NP_SITE_OPS:-./static/placeholder}:/sites/ops:ro
+      - ${NP_SITE_DOCS:-./static/placeholder}:/sites/docs:ro
+    networks: [edge]
+    healthcheck:
+      test: [CMD, wget, -q, -O, /dev/null, http://127.0.0.1:8080/healthz]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+    logging: *logging
+
+  postgres:
+    image: postgres:17.11
+    restart: unless-stopped
+    environment:
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+    command: [postgres, -c, max_connections=400, -c, shared_buffers=256MB]
+    secrets: [postgres_password]
+    volumes: [pgdata:/var/lib/postgresql/data]
+    networks: [data]
+    shm_size: 256mb
+    healthcheck:
+      test: [CMD, pg_isready, -U, postgres, -d, postgres]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+    logging: *logging
+
+  postgres-init:
+    image: postgres:17.11
+    restart: "no"
+    entrypoint: [bash, /init/roles.sh]
+    volumes: [./init/postgres:/init:ro]
+    secrets:
+      - postgres_password
+      - db_url_identity
+      - db_url_payments
+      - db_url_billing
+      - db_url_rails
+      - db_url_agentpay
+      - db_url_compliance
+      - db_url_webhooks
+      - db_url_notify
+      - db_url_sandbox
+      - db_url_sentinel
+      - db_migrate_url_identity
+      - db_migrate_url_payments
+      - db_migrate_url_billing
+      - db_migrate_url_rails
+      - db_migrate_url_agentpay
+      - db_migrate_url_compliance
+      - db_migrate_url_webhooks
+      - db_migrate_url_notify
+      - db_migrate_url_sandbox
+      - db_migrate_url_sentinel
+      - db_registry_url_sentinel
+    networks: [data]
+    depends_on:
+      postgres: { condition: service_healthy }
+    logging: *logging
+
+  nats:
+    image: nats:2.10.29-alpine
+    restart: unless-stopped
+    command: [-js, -sd, /data, -m, "8222"]
+    volumes: [natsdata:/data]
+    networks: [data]
+    healthcheck:
+      test: [CMD, wget, -q, -O, /dev/null, "http://127.0.0.1:8222/healthz?js-enabled-only=true"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+    logging: *logging
+
+  valkey:
+    image: valkey/valkey:8.1.11-alpine
+    restart: unless-stopped
+    command: [valkey-server, --save, "60", "1000", --appendonly, "no", --maxmemory, 256mb, --maxmemory-policy, allkeys-lru]
+    volumes: [valkeydata:/data]
+    networks: [data]
+    healthcheck:
+      test: [CMD, valkey-cli, ping]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+    logging: *logging
+
+  # Smokescreen: the only way webhook deliveries leave the stack (SSRF control, webhooks LLD).
+  egress-proxy:
+    image: nearpay/egress-proxy:smokescreen-v0.1.0
+    build: { context: ./egress-proxy }
+    restart: unless-stopped
+    read_only: true
+    user: "10001:10001"
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    command: [--listen-ip=0.0.0.0, --listen-port=4750, --timeout=10s]
+    networks: [internal, egress]
+    healthcheck:
+      test: [CMD, nc, -z, 127.0.0.1, "4750"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+    logging: *logging
+
+  # ------------------------------------------------------------------------------------------
+  # identity
+  # ------------------------------------------------------------------------------------------
+  migrate-identity:
+    <<: *migrate
+    image: nearpay/identity:${NP_IMAGE_TAG:-local}
+    profiles: [identity]
+    environment: { <<: *env, NP_SERVICE: identity, NP_DB_URL_FILE: /run/secrets/db_migrate_url_identity }
+    secrets: [db_migrate_url_identity]
+
+  identity-api: &identity
+    <<: *node-service
+    image: nearpay/identity:${NP_IMAGE_TAG:-local}
+    profiles: [identity]
+    command: [dist/main.js, api]
+    environment: &identity-env
+      <<: *env
+      NP_SERVICE: identity
+      NP_DB_URL_FILE: /run/secrets/db_url_identity
+      NP_SERVICE_CLIENT_SECRET_FILE: /run/secrets/service_client_identity
+      NP_SERVICE_CLIENTS_FILE: /run/secrets/service_clients
+      NP_JWT_KEYS_DIR: /run/secrets/jwt
+      NP_PII_KEK_FILE: /run/secrets/kek_identity
+      NP_TURNSTILE_SECRET_FILE: /run/secrets/turnstile_secret
+      NP_WEBAUTHN_RP_ID: ${NP_BASE_DOMAIN:-nearpay.localhost}
+      NP_WEBAUTHN_ORIGINS: https://dashboard.${NP_BASE_DOMAIN:-nearpay.localhost}${NP_PORT_SUFFIX:-},https://ops.${NP_BASE_DOMAIN:-nearpay.localhost}${NP_PORT_SUFFIX:-}
+      NP_COOLOFF_SECONDS: ${NP_COOLOFF_SECONDS:-86400}
+      NP_NEAR_RPC_URLS: ${NP_NEAR_RPC_URLS:-https://rpc.mainnet.near.org,https://free.rpc.fastnear.com}
+    secrets:
+      - db_url_identity
+      - service_client_identity
+      - service_clients
+      - kek_identity
+      - turnstile_secret
+      - { source: jwt_current, target: /run/secrets/jwt/current.pem }
+      - { source: jwt_next, target: /run/secrets/jwt/next.pem }
+    networks: [internal, data, egress] # egress: NEAR/EVM RPC for attestations (identity LLD §8.2), Turnstile
+    depends_on:
+      migrate-identity: { condition: service_completed_successfully }
+      nats: { condition: service_healthy }
+      valkey: { condition: service_healthy }
+
+  identity-worker:
+    <<: *identity
+    command: [dist/main.js, worker]
+
+  # ------------------------------------------------------------------------------------------
+  # payments
+  # ------------------------------------------------------------------------------------------
+  migrate-payments:
+    <<: *migrate
+    image: nearpay/payments:${NP_IMAGE_TAG:-local}
+    profiles: [payments]
+    environment: { <<: *env, NP_SERVICE: payments, NP_DB_URL_FILE: /run/secrets/db_migrate_url_payments }
+    secrets: [db_migrate_url_payments]
+
+  payments-api: &payments
+    <<: *node-service
+    image: nearpay/payments:${NP_IMAGE_TAG:-local}
+    profiles: [payments]
+    command: [dist/main.js, api]
+    environment:
+      <<: *env
+      NP_SERVICE: payments
+      NP_DB_URL_FILE: /run/secrets/db_url_payments
+      NP_SERVICE_CLIENT_SECRET_FILE: /run/secrets/service_client_payments
+      NP_PII_KEK_FILE: /run/secrets/kek_payments
+      NP_TICKET_SIGNING_KEY_FILE: /run/secrets/payments_ticket_key
+      NP_TURNSTILE_SECRET_FILE: /run/secrets/turnstile_secret
+    secrets: [db_url_payments, service_client_payments, kek_payments, payments_ticket_key, turnstile_secret]
+    networks: [internal, data, egress] # egress: Turnstile siteverify (payments LLD §8.2)
+    depends_on:
+      migrate-payments: { condition: service_completed_successfully }
+      nats: { condition: service_healthy }
+      valkey: { condition: service_healthy }
+      identity-api: { condition: service_healthy, required: false }
+      rails-api: { condition: service_healthy, required: false }
+
+  payments-worker:
+    <<: *payments
+    command: [dist/main.js, worker]
+
+  # ------------------------------------------------------------------------------------------
+  # rails
+  # ------------------------------------------------------------------------------------------
+  migrate-rails:
+    <<: *migrate
+    image: nearpay/rails:${NP_IMAGE_TAG:-local}
+    profiles: [rails]
+    environment: { <<: *env, NP_SERVICE: rails, NP_DB_URL_FILE: /run/secrets/db_migrate_url_rails }
+    secrets: [db_migrate_url_rails]
+
+  rails-api: &rails
+    <<: *node-service
+    image: nearpay/rails:${NP_IMAGE_TAG:-local}
+    profiles: [rails]
+    command: [dist/main.js, api]
+    environment:
+      <<: [*env, *chain-env]
+      NP_SERVICE: rails
+      NP_DB_URL_FILE: /run/secrets/db_url_rails
+      NP_SERVICE_CLIENT_SECRET_FILE: /run/secrets/service_client_rails
+      NP_NEARDATA_URL: ${NP_NEARDATA_URL:-https://mainnet.neardata.xyz}
+      NP_EXPLORER_ENABLED: ${NP_EXPLORER_ENABLED:-false}
+      NP_PRICING_CURRENCIES: ${NP_PRICING_CURRENCIES:-usd}
+      NP_EVM_RPC_URLS_1: ${NP_EVM_RPC_URLS_1:-}
+      NP_EVM_RPC_URLS_8453: ${NP_EVM_RPC_URLS_8453:-}
+      NP_EVM_RPC_URLS_42161: ${NP_EVM_RPC_URLS_42161:-}
+    secrets: [db_url_rails, service_client_rails]
+    networks: [internal, data, egress]
+    depends_on:
+      migrate-rails: { condition: service_completed_successfully }
+      nats: { condition: service_healthy }
+      compliance-api: { condition: service_healthy, required: false }
+
+  rails-tracker:
+    <<: *rails
+    command: [dist/main.js, tracker]
+
+  rails-feeds:
+    <<: *rails
+    command: [dist/main.js, feeds]
+
+  # ------------------------------------------------------------------------------------------
+  # agentpay
+  # ------------------------------------------------------------------------------------------
+  migrate-agentpay:
+    <<: *migrate
+    image: nearpay/agentpay:${NP_IMAGE_TAG:-local}
+    profiles: [agentpay]
+    environment: { <<: *env, NP_SERVICE: agentpay, NP_DB_URL_FILE: /run/secrets/db_migrate_url_agentpay }
+    secrets: [db_migrate_url_agentpay]
+
+  agentpay-api: &agentpay
+    <<: *node-service
+    image: nearpay/agentpay:${NP_IMAGE_TAG:-local}
+    profiles: [agentpay]
+    command: [dist/main.js, api]
+    environment:
+      <<: [*env, *chain-env]
+      NP_SERVICE: agentpay
+      NP_DB_URL_FILE: /run/secrets/db_url_agentpay
+      NP_SERVICE_CLIENT_SECRET_FILE: /run/secrets/service_client_agentpay
+      NP_PII_KEK_FILE: /run/secrets/kek_agentpay
+      NP_RELAYER_ACCOUNT: ${NP_RELAYER_ACCOUNT:-}
+    secrets: [db_url_agentpay, service_client_agentpay, kek_agentpay]
+    networks: [internal, data, egress]
+    depends_on:
+      migrate-agentpay: { condition: service_completed_successfully }
+      nats: { condition: service_healthy }
+
+  agentpay-batcher:
+    <<: *agentpay
+    command: [dist/main.js, batcher]
+
+  # ------------------------------------------------------------------------------------------
+  # compliance
+  # ------------------------------------------------------------------------------------------
+  migrate-compliance:
+    <<: *migrate
+    image: nearpay/compliance:${NP_IMAGE_TAG:-local}
+    profiles: [compliance]
+    environment: { <<: *env, NP_SERVICE: compliance, NP_DB_URL_FILE: /run/secrets/db_migrate_url_compliance }
+    secrets: [db_migrate_url_compliance]
+
+  compliance-api: &compliance
+    <<: *node-service
+    image: nearpay/compliance:${NP_IMAGE_TAG:-local}
+    profiles: [compliance]
+    command: [dist/main.js, api]
+    environment:
+      <<: *env
+      NP_SERVICE: compliance
+      NP_DB_URL_FILE: /run/secrets/db_url_compliance
+      NP_SERVICE_CLIENT_SECRET_FILE: /run/secrets/service_client_compliance
+      NP_PII_KEK_FILE: /run/secrets/kek_compliance
+      NP_SCREENING_VENDOR: ${NP_SCREENING_VENDOR:-none}
+      NP_KYB_VENDOR: ${NP_KYB_VENDOR:-manual}
+    secrets: [db_url_compliance, service_client_compliance, kek_compliance]
+    networks: [internal, data, egress]
+    depends_on:
+      migrate-compliance: { condition: service_completed_successfully }
+      nats: { condition: service_healthy }
+
+  compliance-worker:
+    <<: *compliance
+    command: [dist/main.js, worker]
+
+  # ------------------------------------------------------------------------------------------
+  # webhooks (the dispatcher reaches merchant endpoints only through egress-proxy)
+  # ------------------------------------------------------------------------------------------
+  migrate-webhooks:
+    <<: *migrate
+    image: nearpay/webhooks:${NP_IMAGE_TAG:-local}
+    profiles: [webhooks]
+    environment: { <<: *env, NP_SERVICE: webhooks, NP_DB_URL_FILE: /run/secrets/db_migrate_url_webhooks }
+    secrets: [db_migrate_url_webhooks]
+
+  webhooks-api: &webhooks
+    <<: *node-service
+    image: nearpay/webhooks:${NP_IMAGE_TAG:-local}
+    profiles: [webhooks]
+    command: [dist/main.js, api]
+    environment:
+      <<: *env
+      NP_SERVICE: webhooks
+      NP_DB_URL_FILE: /run/secrets/db_url_webhooks
+      NP_SERVICE_CLIENT_SECRET_FILE: /run/secrets/service_client_webhooks
+      NP_WEBHOOK_SIGNING_KEY_FILE: /run/secrets/webhook_signing_key
+      NP_ENDPOINT_SECRET_KEK_FILE: /run/secrets/kek_webhooks
+      NP_EGRESS_PROXY: http://egress-proxy:4750
+    secrets: [db_url_webhooks, service_client_webhooks, webhook_signing_key, kek_webhooks]
+    networks: [internal, data]
+    depends_on:
+      migrate-webhooks: { condition: service_completed_successfully }
+      nats: { condition: service_healthy }
+
+  webhooks-ingest:
+    <<: *webhooks
+    command: [dist/main.js, ingest]
+
+  webhooks-dispatcher:
+    <<: *webhooks
+    command: [dist/main.js, dispatcher]
+    depends_on:
+      migrate-webhooks: { condition: service_completed_successfully }
+      nats: { condition: service_healthy }
+      egress-proxy: { condition: service_healthy }
+
+  # ------------------------------------------------------------------------------------------
+  # notify (local: SMTP to Mailpit; server: Postmark + SES)
+  # ------------------------------------------------------------------------------------------
+  migrate-notify:
+    <<: *migrate
+    image: nearpay/notify:${NP_IMAGE_TAG:-local}
+    profiles: [notify]
+    environment: { <<: *env, NP_SERVICE: notify, NP_DB_URL_FILE: /run/secrets/db_migrate_url_notify }
+    secrets: [db_migrate_url_notify]
+
+  notify-api: &notify
+    <<: *node-service
+    image: nearpay/notify:${NP_IMAGE_TAG:-local}
+    profiles: [notify]
+    command: [dist/main.js, api]
+    environment:
+      <<: *env
+      NP_SERVICE: notify
+      NP_DB_URL_FILE: /run/secrets/db_url_notify
+      NP_SERVICE_CLIENT_SECRET_FILE: /run/secrets/service_client_notify
+      NP_PII_KEK_FILE: /run/secrets/kek_notify
+      NP_EMAIL_PROVIDER: ${NP_EMAIL_PROVIDER:-smtp}
+      NP_SMTP_URL: ${NP_SMTP_URL:-smtp://mailpit:1025}
+      NP_FROM: ${NP_FROM:-NearPay <no-reply@nearpay.money>}
+      NP_SECURITY_CONTACTS: ${NP_SECURITY_CONTACTS:-}
+    secrets: [db_url_notify, service_client_notify, kek_notify]
+    networks: [internal, data, egress]
+    depends_on:
+      migrate-notify: { condition: service_completed_successfully }
+      nats: { condition: service_healthy }
+
+  notify-worker:
+    <<: *notify
+    command: [dist/main.js, worker]
+
+  # ------------------------------------------------------------------------------------------
+  # sandbox (test-mode rails, reachable only on the internal network)
+  # ------------------------------------------------------------------------------------------
+  migrate-sandbox:
+    <<: *migrate
+    image: nearpay/sandbox:${NP_IMAGE_TAG:-local}
+    profiles: [sandbox]
+    environment: { <<: *env, NP_SERVICE: sandbox, NP_DB_URL_FILE: /run/secrets/db_migrate_url_sandbox }
+    secrets: [db_migrate_url_sandbox]
+
+  sandbox-api:
+    <<: *node-service
+    image: nearpay/sandbox:${NP_IMAGE_TAG:-local}
+    profiles: [sandbox]
+    command: [dist/main.js, api]
+    environment:
+      <<: *env
+      NP_SERVICE: sandbox
+      NP_DB_URL_FILE: /run/secrets/db_url_sandbox
+      NP_SERVICE_CLIENT_SECRET_FILE: /run/secrets/service_client_sandbox
+      NP_SANDBOX_SIGNING_KEY_FILE: /run/secrets/sandbox_signing_key
+      NP_SANDBOX_TIME_SCALE: ${NP_SANDBOX_TIME_SCALE:-1.0}
+    secrets: [db_url_sandbox, service_client_sandbox, sandbox_signing_key]
+    networks: [internal, data]
+    depends_on:
+      migrate-sandbox: { condition: service_completed_successfully }
+
+  # ------------------------------------------------------------------------------------------
+  # sentinel (separate keys and DB roles; reads identity's registry view as sentinel_ro)
+  # ------------------------------------------------------------------------------------------
+  migrate-sentinel:
+    <<: *migrate
+    image: nearpay/sentinel:${NP_IMAGE_TAG:-local}
+    profiles: [sentinel]
+    environment: { <<: *env, NP_SERVICE: sentinel, NP_DB_URL_FILE: /run/secrets/db_migrate_url_sentinel }
+    secrets: [db_migrate_url_sentinel]
+
+  sentinel-api: &sentinel
+    <<: *node-service
+    image: nearpay/sentinel:${NP_IMAGE_TAG:-local}
+    profiles: [sentinel]
+    command: [dist/main.js, api]
+    environment:
+      <<: [*env, *chain-env]
+      NP_SERVICE: sentinel
+      NP_DB_URL_FILE: /run/secrets/db_url_sentinel
+      NP_REGISTRY_DB_URL_FILE: /run/secrets/db_registry_url_sentinel
+      NP_SERVICE_CLIENT_SECRET_FILE: /run/secrets/service_client_sentinel
+      NP_SENTINEL_SIGNING_KEY_FILE: /run/secrets/sentinel-${NP_SENTINEL_KID:?run scripts/seed.sh keys}.pem
+      NP_PAYMENTS_TICKET_PUBKEY: ${NP_PAYMENTS_TICKET_PUBKEY:?run scripts/seed.sh keys}
+      NP_AUDIT_SAMPLE_RATE: ${NP_AUDIT_SAMPLE_RATE:-1.0}
+    secrets:
+      - db_url_sentinel
+      - db_registry_url_sentinel
+      - service_client_sentinel
+      - { source: sentinel_signing_key, target: "/run/secrets/sentinel-${NP_SENTINEL_KID:?run scripts/seed.sh keys}.pem" }
+    networks: [internal, data, egress]
+    depends_on:
+      migrate-sentinel: { condition: service_completed_successfully }
+      nats: { condition: service_healthy }
+
+  sentinel-auditor:
+    <<: *sentinel
+    command: [dist/main.js, worker]
+
+  # ------------------------------------------------------------------------------------------
+  # billing (Stage 3+)
+  # ------------------------------------------------------------------------------------------
+  migrate-billing:
+    <<: *migrate
+    image: nearpay/billing:${NP_IMAGE_TAG:-local}
+    profiles: [billing]
+    environment: { <<: *env, NP_SERVICE: billing, NP_DB_URL_FILE: /run/secrets/db_migrate_url_billing }
+    secrets: [db_migrate_url_billing]
+
+  billing-api: &billing
+    <<: *node-service
+    image: nearpay/billing:${NP_IMAGE_TAG:-local}
+    profiles: [billing]
+    command: [dist/main.js, api]
+    environment:
+      <<: [*env, *chain-env]
+      NP_SERVICE: billing
+      NP_DB_URL_FILE: /run/secrets/db_url_billing
+      NP_SERVICE_CLIENT_SECRET_FILE: /run/secrets/service_client_billing
+      NP_PII_KEK_FILE: /run/secrets/kek_billing
+      NP_VAULT_CONTRACT: ${NP_VAULT_CONTRACT:-v1.vault.nearpay.near}
+      NP_KEEPER_ACCOUNT: ${NP_KEEPER_ACCOUNT:-}
+      NP_OBJECT_STORE: fs:/data/invoices
+    secrets: [db_url_billing, service_client_billing, kek_billing]
+    volumes: [billing-invoices:/data/invoices]
+    networks: [internal, data, egress]
+    depends_on:
+      migrate-billing: { condition: service_completed_successfully }
+      nats: { condition: service_healthy }
+
+  billing-worker:
+    <<: *billing
+    command: [dist/main.js, worker]

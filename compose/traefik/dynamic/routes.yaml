@@ -1,0 +1,183 @@
+# Gateway routing (lld/platform.md §1 "Traefik routing"). Go-templated by Traefik's file provider:
+# hostnames follow NP_BASE_DOMAIN (local: nearpay.localhost). Every API route passes ForwardAuth
+# (identity /internal/authz), which mints the internal request token. The dashboard and checkout
+# call the API same-origin under /api (prefix stripped), so the API needs no CORS. /internal/* is
+# never routed. Router priorities are explicit: narrower prefixes owned by another service win.
+{{- $d := env "NP_BASE_DOMAIN" }}
+http:
+  routers:
+    healthz:
+      entryPoints: [websecure]
+      rule: 'Host(`api.{{ $d }}`) && Path(`/healthz`)'
+      priority: 1000
+      service: ping@internal
+    ping:
+      entryPoints: [ping]
+      rule: PathPrefix(`/ping`)
+      service: ping@internal
+    payments:
+      entryPoints: [websecure]
+      rule: '(Host(`api.{{ $d }}`) && (Path(`/v1/checkout`) || PathPrefix(`/v1/checkout/`) || Path(`/v1/payment_intents`) || PathPrefix(`/v1/payment_intents/`) || Path(`/v1/refunds`) || PathPrefix(`/v1/refunds/`) || Path(`/v1/payment_links`) || PathPrefix(`/v1/payment_links/`) || Path(`/v1/customers`) || PathPrefix(`/v1/customers/`) || Path(`/v1/balance_transactions`) || PathPrefix(`/v1/balance_transactions/`) || Path(`/v1/test_helpers`) || PathPrefix(`/v1/test_helpers/`))) || ((Host(`pay.{{ $d }}`) || Host(`dashboard.{{ $d }}`)) && (Path(`/api/v1/checkout`) || PathPrefix(`/api/v1/checkout/`) || Path(`/api/v1/payment_intents`) || PathPrefix(`/api/v1/payment_intents/`) || Path(`/api/v1/refunds`) || PathPrefix(`/api/v1/refunds/`) || Path(`/api/v1/payment_links`) || PathPrefix(`/api/v1/payment_links/`) || Path(`/api/v1/customers`) || PathPrefix(`/api/v1/customers/`) || Path(`/api/v1/balance_transactions`) || PathPrefix(`/api/v1/balance_transactions/`) || Path(`/api/v1/test_helpers`) || PathPrefix(`/api/v1/test_helpers/`)))'
+      priority: 100
+      middlewares: [strip-internal-headers, api-prefix, authz, api-headers]
+      service: payments
+    identity:
+      entryPoints: [websecure]
+      rule: '(Host(`api.{{ $d }}`) && (Path(`/v1/account`) || PathPrefix(`/v1/account/`) || Path(`/v1/auth`) || PathPrefix(`/v1/auth/`) || Path(`/v1/api_keys`) || PathPrefix(`/v1/api_keys/`) || Path(`/v1/settlement_destinations`) || PathPrefix(`/v1/settlement_destinations/`))) || ((Host(`pay.{{ $d }}`) || Host(`dashboard.{{ $d }}`)) && (Path(`/api/v1/account`) || PathPrefix(`/api/v1/account/`) || Path(`/api/v1/auth`) || PathPrefix(`/api/v1/auth/`) || Path(`/api/v1/api_keys`) || PathPrefix(`/api/v1/api_keys/`) || Path(`/api/v1/settlement_destinations`) || PathPrefix(`/api/v1/settlement_destinations/`)))'
+      priority: 100
+      middlewares: [strip-internal-headers, api-prefix, authz, api-headers]
+      service: identity
+    compliance:
+      entryPoints: [websecure]
+      rule: '(Host(`api.{{ $d }}`) && (Path(`/v1/account/kyb`) || PathPrefix(`/v1/account/kyb/`) || Path(`/webhooks/kyb`) || PathPrefix(`/webhooks/kyb/`))) || ((Host(`pay.{{ $d }}`) || Host(`dashboard.{{ $d }}`)) && (Path(`/api/v1/account/kyb`) || PathPrefix(`/api/v1/account/kyb/`) || Path(`/api/webhooks/kyb`) || PathPrefix(`/api/webhooks/kyb/`)))'
+      priority: 200
+      middlewares: [strip-internal-headers, api-prefix, authz, api-headers]
+      service: compliance
+    billing:
+      entryPoints: [websecure]
+      rule: '(Host(`api.{{ $d }}`) && (Path(`/v1/products`) || PathPrefix(`/v1/products/`) || Path(`/v1/prices`) || PathPrefix(`/v1/prices/`) || Path(`/v1/tax_rates`) || PathPrefix(`/v1/tax_rates/`) || Path(`/v1/invoices`) || PathPrefix(`/v1/invoices/`) || Path(`/v1/subscriptions`) || PathPrefix(`/v1/subscriptions/`) || Path(`/v1/mandates`) || PathPrefix(`/v1/mandates/`))) || ((Host(`pay.{{ $d }}`) || Host(`dashboard.{{ $d }}`)) && (Path(`/api/v1/products`) || PathPrefix(`/api/v1/products/`) || Path(`/api/v1/prices`) || PathPrefix(`/api/v1/prices/`) || Path(`/api/v1/tax_rates`) || PathPrefix(`/api/v1/tax_rates/`) || Path(`/api/v1/invoices`) || PathPrefix(`/api/v1/invoices/`) || Path(`/api/v1/subscriptions`) || PathPrefix(`/api/v1/subscriptions/`) || Path(`/api/v1/mandates`) || PathPrefix(`/api/v1/mandates/`)))'
+      priority: 100
+      middlewares: [strip-internal-headers, api-prefix, authz, api-headers]
+      service: billing
+    webhooks:
+      entryPoints: [websecure]
+      rule: '(Host(`api.{{ $d }}`) && (Path(`/v1/webhook_endpoints`) || PathPrefix(`/v1/webhook_endpoints/`) || Path(`/v1/events`) || PathPrefix(`/v1/events/`) || Path(`/v1/webhook_signing_keys`) || PathPrefix(`/v1/webhook_signing_keys/`))) || ((Host(`pay.{{ $d }}`) || Host(`dashboard.{{ $d }}`)) && (Path(`/api/v1/webhook_endpoints`) || PathPrefix(`/api/v1/webhook_endpoints/`) || Path(`/api/v1/events`) || PathPrefix(`/api/v1/events/`) || Path(`/api/v1/webhook_signing_keys`) || PathPrefix(`/api/v1/webhook_signing_keys/`)))'
+      priority: 100
+      middlewares: [strip-internal-headers, api-prefix, authz, api-headers]
+      service: webhooks
+    agentpay:
+      entryPoints: [websecure]
+      rule: '(Host(`api.{{ $d }}`) && (Path(`/x402`) || PathPrefix(`/x402/`) || Path(`/v1/agent_payments`) || PathPrefix(`/v1/agent_payments/`) || PathRegexp(`^/v1/checkout/sessions/[^/]+/agent_pay(/.*)?$`))) || ((Host(`pay.{{ $d }}`) || Host(`dashboard.{{ $d }}`)) && (Path(`/api/x402`) || PathPrefix(`/api/x402/`) || Path(`/api/v1/agent_payments`) || PathPrefix(`/api/v1/agent_payments/`) || PathRegexp(`^/api/v1/checkout/sessions/[^/]+/agent_pay(/.*)?$`)))'
+      priority: 200
+      middlewares: [strip-internal-headers, api-prefix, authz, api-headers]
+      service: agentpay
+    sentinel:
+      entryPoints: [websecure]
+      rule: '(Host(`api.{{ $d }}`) && (Path(`/v1/attestations`) || PathPrefix(`/v1/attestations/`))) || ((Host(`pay.{{ $d }}`) || Host(`dashboard.{{ $d }}`)) && (Path(`/api/v1/attestations`) || PathPrefix(`/api/v1/attestations/`)))'
+      priority: 100
+      middlewares: [strip-internal-headers, sentinel-ratelimit, api-prefix, authz, api-headers]
+      service: sentinel
+    notify:
+      entryPoints: [websecure]
+      rule: '(Host(`api.{{ $d }}`) && (Path(`/webhooks/email`) || PathPrefix(`/webhooks/email/`))) || ((Host(`pay.{{ $d }}`) || Host(`dashboard.{{ $d }}`)) && (Path(`/api/webhooks/email`) || PathPrefix(`/api/webhooks/email/`)))'
+      priority: 100
+      middlewares: [strip-internal-headers, api-prefix, authz, api-headers]
+      service: notify
+    rails:
+      entryPoints: [websecure]
+      rule: '(Host(`api.{{ $d }}`) && (Path(`/v1/assets`) || PathPrefix(`/v1/assets/`))) || ((Host(`pay.{{ $d }}`) || Host(`dashboard.{{ $d }}`)) && (Path(`/api/v1/assets`) || PathPrefix(`/api/v1/assets/`)))'
+      priority: 100
+      middlewares: [strip-internal-headers, api-prefix, authz, api-headers]
+      service: rails
+    site-pay:
+      entryPoints: [websecure]
+      rule: 'Host(`pay.{{ $d }}`)'
+      priority: 10
+      service: static
+    site-js:
+      entryPoints: [websecure]
+      rule: 'Host(`js.{{ $d }}`)'
+      priority: 10
+      service: static
+    site-dashboard:
+      entryPoints: [websecure]
+      rule: 'Host(`dashboard.{{ $d }}`)'
+      priority: 10
+      service: static
+    site-ops:
+      entryPoints: [websecure]
+      rule: 'Host(`ops.{{ $d }}`)'
+      priority: 10
+      service: static
+    site-docs:
+      entryPoints: [websecure]
+      rule: 'Host(`docs.{{ $d }}`)'
+      priority: 10
+      service: static
+    mail:
+      entryPoints: [websecure]
+      rule: 'Host(`mail.{{ $d }}`)'
+      service: mailpit
+    merchant-demo:
+      entryPoints: [websecure]
+      rule: 'Host(`merchant-demo.{{ $d }}`)'
+      service: merchant-demo
+
+  middlewares:
+    # A client can never present an internal token: only ForwardAuth's response sets it.
+    strip-internal-headers:
+      headers:
+        customRequestHeaders:
+          X-NearPay-Token: ""
+    api-prefix:
+      stripPrefix:
+        prefixes: [/api]
+    authz:
+      forwardAuth:
+        address: http://identity-api:8080/internal/authz
+        trustForwardHeader: false # Method/Uri come from the request as routed (after /api stripping), never from the client
+        authResponseHeaders: [X-NearPay-Token, X-Request-Id]
+    api-headers:
+      headers:
+        contentTypeNosniff: true
+        frameDeny: true
+        referrerPolicy: no-referrer
+        customResponseHeaders:
+          Cache-Control: "no-store"
+    # sentinel LLD §2: anonymous route, per-IP limit 10 rps.
+    sentinel-ratelimit:
+      rateLimit:
+        average: 10
+        burst: 20
+        period: 1s
+
+  services:
+    payments:
+      loadBalancer:
+        servers: [{ url: http://payments-api:8080 }]
+    identity:
+      loadBalancer:
+        servers: [{ url: http://identity-api:8080 }]
+    compliance:
+      loadBalancer:
+        servers: [{ url: http://compliance-api:8080 }]
+    billing:
+      loadBalancer:
+        servers: [{ url: http://billing-api:8080 }]
+    webhooks:
+      loadBalancer:
+        servers: [{ url: http://webhooks-api:8080 }]
+    agentpay:
+      loadBalancer:
+        servers: [{ url: http://agentpay-api:8080 }]
+    sentinel:
+      loadBalancer:
+        servers: [{ url: http://sentinel-api:8080 }]
+    notify:
+      loadBalancer:
+        servers: [{ url: http://notify-api:8080 }]
+    rails:
+      loadBalancer:
+        servers: [{ url: http://rails-api:8080 }]
+    static:
+      loadBalancer:
+        servers: [{ url: http://static:8080 }]
+    mailpit:
+      loadBalancer:
+        servers: [{ url: http://mailpit:8025 }]
+    merchant-demo:
+      loadBalancer:
+        servers: [{ url: http://merchant-demo:3000 }]
+
+tls:
+  options:
+    default:
+      minVersion: VersionTLS12
+  stores:
+    default:
+      defaultCertificate:
+        certFile: /certs/cert.pem
+        keyFile: /certs/key.pem
+  certificates:
+    - certFile: /certs/cert.pem
+      keyFile: /certs/key.pem

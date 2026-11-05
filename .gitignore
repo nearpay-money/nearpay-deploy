@@ -9,3 +9,7 @@
 *.retry
 *.dec.*
 .DS_Store
+
+# Local secrets and generated state (scripts/seed.sh); never committed.
+.secrets/
+compose/env/local.env

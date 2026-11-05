@@ -1,0 +1,29 @@
+name: ci
+on:
+  push:
+    branches: [main]
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Shell scripts
+        run: shellcheck scripts/*.sh compose/init/postgres/roles.sh
+      - name: Seed throwaway test keys
+        run: scripts/seed.sh keys
+      - name: Compose configuration (every profile)
+        run: |
+          cp compose/env/local.env.example compose/env/local.env
+          docker compose --project-directory compose -f compose/compose.yaml -f compose/compose.local.yaml \
+            --env-file compose/env/local.env --env-file .secrets/public/keys.env --profile '*' config --quiet
+      - name: Platform starts healthy
+        run: |
+          docker compose --project-name nearpay --project-directory compose -f compose/compose.yaml -f compose/compose.local.yaml \
+            --env-file compose/env/local.env --env-file .secrets/public/keys.env up -d --wait --build
+          curl -fsS --cacert .secrets/tls/ca.pem --resolve api.nearpay.localhost:443:127.0.0.1 https://api.nearpay.localhost/healthz

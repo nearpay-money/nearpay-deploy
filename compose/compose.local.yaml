@@ -1,0 +1,125 @@
+# Local profile (lld/platform.md §1): published ports on 127.0.0.1 only, the package registry,
+# Mailpit and the merchant demo. NearPay service images (nearpay/<svc>:local) are built by
+# scripts/up.sh from the sibling repositories with `docker build --network host`, so `pnpm install`
+# inside each Dockerfile reaches the registry at http://127.0.0.1:4873 (build arg NP_REGISTRY_URL);
+# up.sh publishes nearpay-spec and nearpay-kit there first. Compose never builds or pulls them.
+
+x-local-image: &local-image
+  pull_policy: never
+
+networks:
+  # The merchant demo and the egress proxy only: webhook deliveries may reach exactly one
+  # private address (the demo, webhooks LLD L-WH-02); everything else private stays blocked.
+  demo:
+    internal: true
+    ipam:
+      config: [{ subnet: "${NP_DEMO_SUBNET:-10.233.250.0/29}" }]
+
+volumes:
+  registry-data: {}
+
+services:
+  traefik:
+    ports:
+      - 127.0.0.1:${NP_HTTP_PORT:-80}:80
+      - 127.0.0.1:${NP_HTTPS_PORT:-443}:443
+    networks:
+      demo:
+        aliases:
+          - api.${NP_BASE_DOMAIN:-nearpay.localhost}
+
+  # Local npm registry for @nearpay/* and @nearpay-internal/* (system audit S-11; ADR-0001).
+  registry:
+    image: verdaccio/verdaccio:6.10.6
+    restart: unless-stopped
+    volumes:
+      - ./registry/config.yaml:/verdaccio/conf/config.yaml:ro
+      - registry-data:/verdaccio/storage
+    ports:
+      - 127.0.0.1:${NP_REGISTRY_PORT:-4873}:4873
+    networks: [edge]
+    healthcheck:
+      test: [CMD, wget, -q, -O, /dev/null, http://127.0.0.1:4873/-/ping]
+      interval: 3s
+      timeout: 3s
+      retries: 40
+
+  mailpit:
+    image: axllent/mailpit:v1.27.11
+    restart: unless-stopped
+    read_only: true
+    tmpfs: [/tmp]
+    environment:
+      MP_MAX_MESSAGES: "2000"
+      MP_SMTP_AUTH_ACCEPT_ANY: "1"
+      MP_SMTP_AUTH_ALLOW_INSECURE: "1"
+    networks: [internal]
+    healthcheck:
+      test: [CMD, /mailpit, readyz]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
+  egress-proxy:
+    command:
+      - --listen-ip=0.0.0.0
+      - --listen-port=4750
+      - --timeout=10s
+      - --allow-address=${NP_DEMO_IP:-10.233.250.2}
+    networks: [internal, egress, demo]
+
+  merchant-demo:
+    image: nearpay/merchant-demo:${NP_IMAGE_TAG:-local}
+    profiles: [merchant-demo]
+    pull_policy: never
+    restart: unless-stopped
+    init: true
+    read_only: true
+    tmpfs: [/tmp]
+    user: "10001:10001"
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    environment:
+      NP_ENV: local
+      NP_PUBLIC_API_URL: https://api.${NP_BASE_DOMAIN:-nearpay.localhost}${NP_PORT_SUFFIX:-}
+      NODE_EXTRA_CA_CERTS: /certs/ca.pem # trusts the local TLS certificate when calling the API
+    volumes:
+      - ../.secrets/tls/ca.pem:/certs/ca.pem:ro
+    networks:
+      demo: { ipv4_address: "${NP_DEMO_IP:-10.233.250.2}" }
+    depends_on:
+      traefik: { condition: service_healthy }
+      payments-api: { condition: service_healthy, required: false }
+
+  # ---- NearPay services: images come from scripts/up.sh, never from a registry ----------------
+  migrate-identity: *local-image
+  identity-api: *local-image
+  identity-worker: *local-image
+  migrate-payments: *local-image
+  payments-api: *local-image
+  payments-worker: *local-image
+  migrate-rails: *local-image
+  rails-api: *local-image
+  rails-tracker: *local-image
+  rails-feeds: *local-image
+  migrate-agentpay: *local-image
+  agentpay-api: *local-image
+  agentpay-batcher: *local-image
+  migrate-compliance: *local-image
+  compliance-api: *local-image
+  compliance-worker: *local-image
+  migrate-webhooks: *local-image
+  webhooks-api: *local-image
+  webhooks-ingest: *local-image
+  webhooks-dispatcher: *local-image
+  migrate-notify: *local-image
+  notify-api: *local-image
+  notify-worker: *local-image
+  migrate-sandbox: *local-image
+  sandbox-api: *local-image
+  migrate-sentinel: *local-image
+  sentinel-api: *local-image
+  sentinel-auditor: *local-image
+  migrate-billing: *local-image
+  billing-api: *local-image
+  billing-worker: *local-image
