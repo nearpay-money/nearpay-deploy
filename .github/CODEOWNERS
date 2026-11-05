@@ -1,0 +1,7 @@
+# Human review required (T-15: AI-agent guardrail). Teams are placeholders until the GitHub org exists.
+* @nearpay-money/maintainers
+
+# Money-critical paths: two human approvals
+envs/prod-nue/ @nearpay-money/money-path-reviewers
+envs/prod-vie/ @nearpay-money/money-path-reviewers
+secrets/ @nearpay-money/money-path-reviewers
