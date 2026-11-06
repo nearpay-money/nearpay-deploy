@@ -90,7 +90,7 @@ live=()
 compose() {
   docker compose --project-name nearpay --project-directory "$compose_dir" \
     -f "$compose_dir/compose.yaml" -f "$compose_dir/compose.local.yaml" \
-    "${live[@]}" \
+    ${live[@]+"${live[@]}"} \
     --env-file "$env_file" --env-file "$secrets/public/keys.env" "$@"
 }
 
