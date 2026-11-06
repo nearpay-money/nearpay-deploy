@@ -19,6 +19,7 @@ the service Dockerfiles and the Testcontainers suites use, so no repository chan
 | `nginxinc/nginx-unprivileged:1.29.8-alpine` | nginx 1.28 from Ubuntu 25.10, unprivileged layout (user 101, `/tmp`) |
 | `verdaccio/verdaccio:6.10.6` | verdaccio from npm on the local node image |
 | `ghcr.io/foundry-rs/foundry:v1.4.4` | official Foundry release binaries (anvil, forge, cast, chisel) |
+| `nearpay/egress-proxy:smokescreen-v0.1.0` | Smokescreen v0.1.0 built offline from its vendored sources with Go 1.26 from Ubuntu's packages |
 
 The base is `nearpay-local/ubuntu:25.10`, a debootstrap of Ubuntu 25.10 made by `images/rootfs.sh`.
 Downloads are verified against `SHA256SUMS`. Distro packages can trail a tag's patch level (for
@@ -42,6 +43,9 @@ images/build.sh postgres                  # one image
   trusted inside the node images so `pnpm install` works during service image builds. The CA stays in
   these local stand-ins only.
 - `NP_IMAGES_UPDATE_SUMS=1`: record checksums for new downloads (after a version bump).
+- Start the stack with `scripts/up.sh --no-build` after building the service images yourself: a plain
+  `up.sh` asks Compose to rebuild the egress proxy from `compose/egress-proxy/Dockerfile`, which pulls
+  `golang`/`alpine`.
 - Testcontainers' reaper image is not built: run tests with `TESTCONTAINERS_RYUK_DISABLED=true`.
 
 Remove the stand-ins (and let Docker pull the official images again) with

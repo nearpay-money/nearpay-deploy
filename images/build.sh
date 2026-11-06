@@ -48,6 +48,7 @@ IMAGES=(
   "nginx|nginxinc/nginx-unprivileged:1.29.8-alpine|nginx"
   "verdaccio|verdaccio/verdaccio:6.10.6|verdaccio"
   "foundry|ghcr.io/foundry-rs/foundry:v1.4.4|foundry"
+  "egress-proxy|nearpay/egress-proxy:smokescreen-v0.1.0|egress-proxy"
 )
 
 force=0
@@ -103,6 +104,18 @@ fetch_for() {
     traefik) gh traefik/traefik "v$TRAEFIK_VERSION" "traefik_v${TRAEFIK_VERSION}_linux_amd64.tar.gz" ;;
     mailpit) gh axllent/mailpit "v$MAILPIT_VERSION" mailpit-linux-amd64.tar.gz ;;
     foundry) gh foundry-rs/foundry "v$FOUNDRY_VERSION" "foundry_v${FOUNDRY_VERSION}_linux_amd64.tar.gz" ;;
+    egress-proxy)
+      fetch "http://archive.ubuntu.com/ubuntu/pool/main/g/golang-1.26/golang-1.26-go_1.26.0-1_amd64.deb" golang-1.26-go_1.26.0-1_amd64.deb
+      fetch "http://archive.ubuntu.com/ubuntu/pool/main/g/golang-1.26/golang-1.26-src_1.26.0-1_all.deb" golang-1.26-src_1.26.0-1_all.deb
+      if [ ! -s "$cache/smokescreen-v0.1.0.tar.gz" ]; then # git archive output is reproducible for a tag
+        local src
+        src="$(mktemp -d)"
+        git clone -q --depth 1 --branch v0.1.0 https://github.com/stripe/smokescreen "$src/s"
+        git -C "$src/s" archive --format=tar.gz --prefix=smokescreen/ -o "$cache/smokescreen-v0.1.0.tar.gz" v0.1.0
+        rm -rf "$src"
+      fi
+      fetch "unused://smokescreen" smokescreen-v0.1.0.tar.gz
+      ;;
     postgres)
       fetch "https://raw.githubusercontent.com/docker-library/postgres/$PG_ENTRYPOINT_COMMIT/17/trixie/docker-entrypoint.sh" \
         postgres-docker-entrypoint.sh
