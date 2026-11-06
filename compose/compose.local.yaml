@@ -13,7 +13,9 @@ networks:
   demo:
     internal: true
     ipam:
-      config: [{ subnet: "${NP_DEMO_SUBNET:-10.233.250.0/29}" }]
+      # dynamic addresses (traefik, egress proxy) come from the upper half so the demo's fixed
+      # NP_DEMO_IP (.2) is always free
+      config: [{ subnet: "${NP_DEMO_SUBNET:-10.233.250.0/29}", ip_range: "${NP_DEMO_IP_RANGE:-10.233.250.4/30}" }]
 
 volumes:
   registry-data: {}
@@ -85,6 +87,7 @@ services:
       NODE_EXTRA_CA_CERTS: /certs/ca.pem # trusts the local TLS certificate when calling the API
     volumes:
       - ../.secrets/tls/ca.pem:/certs/ca.pem:ro
+      - ../.secrets/merchant-demo:/run/secrets/merchant-demo:ro # secret_key, webhook_secret (seed.sh data)
     networks:
       demo: { ipv4_address: "${NP_DEMO_IP:-10.233.250.2}" }
     depends_on:

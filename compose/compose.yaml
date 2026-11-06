@@ -454,6 +454,9 @@ services:
       NP_PII_KEK_FILE: /run/secrets/kek_compliance
       NP_SCREENING_VENDOR: ${NP_SCREENING_VENDOR:-none}
       NP_KYB_VENDOR: ${NP_KYB_VENDOR:-manual}
+      # OFAC SDN list: downloaded on the worker's first start and daily at 03:00 UTC (SP-15); set false
+      # offline and load a file with `ops.js sanctions-import - < SDN_ADVANCED.XML`.
+      NP_SANCTIONS_REFRESH: ${NP_SANCTIONS_REFRESH:-true}
     secrets: [db_url_compliance, service_client_compliance, kek_compliance]
     networks: [internal, data, egress]
     depends_on:
@@ -530,6 +533,8 @@ services:
       NP_SMTP_URL: ${NP_SMTP_URL:-smtp://mailpit:1025}
       NP_FROM: ${NP_FROM:-NearPay <no-reply@nearpay.money>}
       NP_SECURITY_CONTACTS: ${NP_SECURITY_CONTACTS:-}
+      # customer receipts for test-mode payments: on locally (Mailpit catches every mail), off on servers
+      NP_TEST_MODE_RECEIPTS: ${NP_TEST_MODE_RECEIPTS:-true}
     secrets: [db_url_notify, service_client_notify, kek_notify]
     networks: [internal, data, egress]
     depends_on:

@@ -96,7 +96,9 @@ compose up -d --wait registry >/dev/null
 
 missing_packages() { # repo → prints name@version of every package not in the registry
   local repo="$1" pkg name version
-  for pkg in "$work/$repo"/packages/*/package.json; do
+  local manifests=("$work/$repo"/packages/*/package.json)
+  [ -f "${manifests[0]}" ] || manifests=("$work/$repo/package.json") # single-package repos (nearpay-node)
+  for pkg in "${manifests[@]}"; do
     [ -f "$pkg" ] || continue
     name="$(node -p "require('$pkg').name")"
     version="$(node -p "require('$pkg').version")"
@@ -128,6 +130,8 @@ publish_repo() {
 }
 publish_repo nearpay-spec
 publish_repo nearpay-kit
+# client packages the merchant demo installs (@nearpay/node, @nearpay/x402, @nearpay/agent-signer)
+for repo in nearpay-node nearpay-agentkit; do [ -d "$work/$repo" ] && publish_repo "$repo"; done
 
 # ---- images ----------------------------------------------------------------------------------
 # Built here rather than by Compose: the build must reach the registry on the host's loopback
