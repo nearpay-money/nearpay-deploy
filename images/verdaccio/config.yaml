@@ -1,0 +1,11 @@
+# Default configuration (the stack mounts its own, compose/registry/config.yaml).
+storage: /verdaccio/storage/data
+plugins: /verdaccio/plugins
+auth:
+  htpasswd:
+    file: /verdaccio/storage/htpasswd
+packages:
+  "**":
+    access: $all
+    publish: $authenticated
+log: { type: stdout, format: pretty, level: http }
