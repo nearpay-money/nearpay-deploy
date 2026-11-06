@@ -85,7 +85,16 @@ case "$cmd" in
     tls "${2:-}"
     ;;
   data)
-    die "demo data needs identity and payments (development step 1.2); nothing to seed yet"
+    # Demo merchant (test mode): identity's ops CLI creates the owner, account, a test destination and
+    # API keys (idempotent: an existing demo user is returned as is). Keys land in .secrets/demo.json.
+    docker compose -p nearpay ps --status running --services 2>/dev/null | grep -qx identity-api ||
+      die "identity-api is not running (start the stack with scripts/up.sh first)"
+    out="$(docker compose -p nearpay exec -T identity-api /nodejs/bin/node dist/ops.js seed-demo "${@:2}")" ||
+      die "identity seed-demo failed"
+    umask 077
+    printf '%s\n' "$out" >"$secrets/demo.json"
+    say "demo merchant ready (test mode); keys in .secrets/demo.json:"
+    printf '%s\n' "$out" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const j=JSON.parse(s);console.log(`  account ${j.account}\n  owner   ${j.owner}\n  created ${j.created}`)})'
     ;;
   *)
     say "usage: scripts/seed.sh keys [--renew-tls] | data" >&2
