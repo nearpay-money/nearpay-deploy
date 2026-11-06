@@ -84,9 +84,13 @@ for svc in "${SERVICES[@]}"; do
 done
 if [ -f "$work/nearpay-testbed/merchant-demo/Dockerfile" ]; then profiles+=(--profile merchant-demo); enabled+=(merchant-demo); else skipped+=(merchant-demo); fi
 
+# owner mainnet credentials overlay (scripts/seed.sh live), when present
+live=()
+[ -f "$deploy/.secrets/live/compose.live.yaml" ] && live=(-f "$deploy/.secrets/live/compose.live.yaml")
 compose() {
   docker compose --project-name nearpay --project-directory "$compose_dir" \
     -f "$compose_dir/compose.yaml" -f "$compose_dir/compose.local.yaml" \
+    ${live[@]+"${live[@]}"} \
     --env-file "$env_file" --env-file "$secrets/public/keys.env" "$@"
 }
 

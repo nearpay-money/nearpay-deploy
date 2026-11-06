@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # Local test-only material for the Compose stack (lld/platform.md §1).
 #   scripts/seed.sh keys [--renew-tls]   secrets + key pairs + TLS certificate into .secrets/ (idempotent)
-#   scripts/seed.sh data                 demo merchant via the API (needs identity + payments, step 1.2+)
+#   scripts/seed.sh data                 demo merchant, merchant-demo webhook + key, funded demo agent (test mode)
+#   scripts/seed.sh live                 check owner-provided mainnet credentials in .secrets/live/ and
+#                                        generate the Compose overlay that passes them to rails/agentpay
 set -euo pipefail
 deploy="$(cd "$(dirname "$0")/.." && pwd)"
 secrets="${NP_SECRETS_DIR:-$deploy/.secrets}"
@@ -85,6 +87,7 @@ case "$cmd" in
     tls "${2:-}"
     # merchant-demo reads its test-mode key and webhook secret from here (filled by `seed.sh data`)
     mkdir -p "$secrets/merchant-demo" && chmod 755 "$secrets/merchant-demo"
+    mkdir -p "$secrets/live" && chmod 700 "$secrets/live"
     ;;
   data)
     # Demo data (test mode):
@@ -139,8 +142,18 @@ case "$cmd" in
       say "demo agent $agent: 100 USDC in the sandbox Intents ledger"
     fi
     ;;
+  live)
+    # Owner-provided mainnet credentials (never generated here); see scripts/lib/live-overlay.mjs.
+    mkdir -p "$secrets/live" && chmod 700 "$secrets/live"
+    node "$deploy/scripts/lib/live-overlay.mjs" "$secrets/live" || die "fix the files in .secrets/live/ and re-run"
+    for v in NP_TREASURY_ACCOUNT NP_RELAYER_ACCOUNT NP_EVM_RPC_URLS_8453 NP_EVM_RPC_URLS_42161; do
+      val="$(sed -n "s/^$v=//p" "$env_file" 2>/dev/null | tail -1)"
+      say "  $v: ${val:-<unset in compose/env/local.env>}"
+    done
+    say "overlay written to .secrets/live/compose.live.yaml (up.sh includes it)"
+    ;;
   *)
-    say "usage: scripts/seed.sh keys [--renew-tls] | data" >&2
+    say "usage: scripts/seed.sh keys [--renew-tls] | data | live" >&2
     exit 2
     ;;
 esac

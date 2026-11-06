@@ -18,7 +18,11 @@ done
 [ -f "$env_file" ] || env_file="$compose_dir/env/local.env.example"
 [ -f "$keys" ] || { printf 'down: nothing to stop (no seeded secrets)\n'; exit 0; }
 
+# owner mainnet credentials overlay (scripts/seed.sh live), when present
+live=()
+[ -f "$deploy/.secrets/live/compose.live.yaml" ] && live=(-f "$deploy/.secrets/live/compose.live.yaml")
 # Every profile, so services started by any earlier `up` are stopped too.
 exec docker compose --project-name nearpay --project-directory "$compose_dir" \
   -f "$compose_dir/compose.yaml" -f "$compose_dir/compose.local.yaml" \
+    ${live[@]+"${live[@]}"} \
   --env-file "$env_file" --env-file "$keys" --profile '*' "${args[@]}"

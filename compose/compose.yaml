@@ -426,6 +426,7 @@ services:
     depends_on:
       migrate-agentpay: { condition: service_completed_successfully }
       nats: { condition: service_healthy }
+      valkey: { condition: service_healthy }
 
   agentpay-batcher:
     <<: *agentpay
@@ -489,6 +490,7 @@ services:
       NP_SERVICE_CLIENT_SECRET_FILE: /run/secrets/service_client_webhooks
       NP_WEBHOOK_SIGNING_KEY_FILE: /run/secrets/webhook_signing_key
       NP_ENDPOINT_SECRET_KEK_FILE: /run/secrets/kek_webhooks
+      NP_WEBHOOK_SIGNING_KID: ${NP_WEBHOOK_SIGNING_KID:-}
       NP_EGRESS_PROXY: http://egress-proxy:4750
     secrets: [db_url_webhooks, service_client_webhooks, webhook_signing_key, kek_webhooks]
     networks: [internal, data]
@@ -506,6 +508,7 @@ services:
     depends_on:
       migrate-webhooks: { condition: service_completed_successfully }
       nats: { condition: service_healthy }
+      valkey: { condition: service_healthy }
       egress-proxy: { condition: service_healthy }
 
   # ------------------------------------------------------------------------------------------
