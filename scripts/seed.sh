@@ -83,18 +83,61 @@ case "$cmd" in
     command -v node >/dev/null 2>&1 || die "Node.js 22 is required (https://nodejs.org)"
     NP_SECRETS_DIR="$secrets" node "$deploy/scripts/lib/seed-keys.mjs"
     tls "${2:-}"
+    # merchant-demo reads its test-mode key and webhook secret from here (filled by `seed.sh data`)
+    mkdir -p "$secrets/merchant-demo" && chmod 755 "$secrets/merchant-demo"
     ;;
   data)
-    # Demo merchant (test mode): identity's ops CLI creates the owner, account, a test destination and
-    # API keys (idempotent: an existing demo user is returned as is). Keys land in .secrets/demo.json.
-    docker compose -p nearpay ps --status running --services 2>/dev/null | grep -qx identity-api ||
-      die "identity-api is not running (start the stack with scripts/up.sh first)"
+    # Demo data (test mode):
+    # 1. identity seed-demo: owner, account, test destination and API keys (idempotent on the email);
+    #    keys in .secrets/demo.json
+    # 2. merchant-demo: its secret key and a webhook endpoint http://merchant-demo:3000/webhooks
+    #    (payment_intent.*, checkout.session.*, agent_payment.*) with its signing secret, in
+    #    .secrets/merchant-demo/ (test-mode values; readable by the container user)
+    # 3. sandbox: the demo agent's simulated Intents balance (USDC), topped up to 100 USDC
+    running() { docker compose -p nearpay ps --status running --services 2>/dev/null | grep -qx "$1"; }
+    running identity-api || die "identity-api is not running (start the stack with scripts/up.sh first)"
     out="$(docker compose -p nearpay exec -T identity-api /nodejs/bin/node dist/ops.js seed-demo "${@:2}")" ||
       die "identity seed-demo failed"
-    umask 077
-    printf '%s\n' "$out" >"$secrets/demo.json"
-    say "demo merchant ready (test mode); keys in .secrets/demo.json:"
-    printf '%s\n' "$out" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const j=JSON.parse(s);console.log(`  account ${j.account}\n  owner   ${j.owner}\n  created ${j.created}`)})'
+    (umask 077 && printf '%s\n' "$out" >"$secrets/demo.json")
+    sk="$(printf '%s' "$out" | node -pe 'JSON.parse(require("fs").readFileSync(0)).secret_key')"
+    say "demo merchant ready (test mode); keys in .secrets/demo.json"
+
+    mkdir -p "$secrets/merchant-demo" && chmod 755 "$secrets/merchant-demo"
+    printf '%s' "$sk" >"$secrets/merchant-demo/secret_key" && chmod 644 "$secrets/merchant-demo/secret_key"
+    domain="$(sed -n 's/^NP_BASE_DOMAIN=//p' "$deploy/compose/env/local.env" 2>/dev/null | tail -1)"
+    domain="${NP_BASE_DOMAIN:-${domain:-nearpay.localhost}}"
+    port="$(sed -n 's/^NP_HTTPS_PORT=//p' "$deploy/compose/env/local.env" 2>/dev/null | tail -1)"
+    port="${NP_HTTPS_PORT:-${port:-443}}"
+    api() { # method path [json]
+      curl -fsS --noproxy '*' --cacert "$secrets/tls/ca.pem" --resolve "api.$domain:$port:127.0.0.1" \
+        -X "$1" "https://api.$domain:$port$2" -H "authorization: Bearer $sk" \
+        ${3:+-H "content-type: application/json" -H "idempotency-key: seed-$(date +%s)-$RANDOM" -d "$3"}
+    }
+    hook="http://merchant-demo:3000/webhooks"
+    if [ -s "$secrets/merchant-demo/webhook_secret" ] &&
+      api GET "/v1/webhook_endpoints?limit=100" | grep -q "\"$hook\""; then
+      say "merchant-demo webhook endpoint present"
+    else
+      events='["payment_intent.created","payment_intent.processing","payment_intent.succeeded","payment_intent.payment_failed","payment_intent.requires_review","payment_intent.overpaid","payment_intent.canceled","checkout.session.completed","checkout.session.expired","agent_payment.settled","agent_payment.failed"]'
+      created="$(api POST /v1/webhook_endpoints "{\"url\":\"$hook\",\"enabled_events\":$events,\"description\":\"merchant-demo (seed.sh)\"}")" ||
+        die "creating the merchant-demo webhook endpoint failed (is webhooks-api running?)"
+      printf '%s' "$created" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>process.stdout.write(JSON.parse(s).secret))' \
+        >"$secrets/merchant-demo/webhook_secret"
+      chmod 644 "$secrets/merchant-demo/webhook_secret"
+      say "merchant-demo webhook endpoint created ($hook)"
+    fi
+
+    agent="${NP_DEMO_AGENT_ACCOUNT:-0857962d91335176f92257df38175401936a4ca31b832f0c98c77b836800c655}" # test-only key (testbed demo/agent.ts)
+    usdc="nep141:17208628f84f5d6ad33f0da3bbbeb27ffcb398eac501a31bd6ad2011e36133a1"
+    if running sandbox-api; then
+      bal="$(docker compose -p nearpay exec -T sandbox-api /nodejs/bin/node dist/ops.js intents-balance "$agent" "$usdc" |
+        node -pe 'JSON.parse(require("fs").readFileSync(0)).balance')"
+      if [ "$bal" -lt 100000000 ]; then
+        docker compose -p nearpay exec -T sandbox-api /nodejs/bin/node dist/ops.js intents-fund "$agent" "$usdc" \
+          "$((100000000 - bal))" >/dev/null || die "funding the demo agent failed"
+      fi
+      say "demo agent $agent: 100 USDC in the sandbox Intents ledger"
+    fi
     ;;
   *)
     say "usage: scripts/seed.sh keys [--renew-tls] | data" >&2
