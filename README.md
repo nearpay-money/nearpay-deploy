@@ -40,6 +40,8 @@ nearpay-deploy/
 │   ├── up.sh                   seed → registry → publish spec/kit if missing → build images → start, wait healthy
 │   ├── down.sh                 stop (add --volumes to delete local data)
 │   ├── seed.sh                 keys: test-only secrets and TLS certificate into .secrets/ (git-ignored)
+│   ├── live-setup.mjs          one-time mainnet on-chain setup (relayer keys, agent Intents deposit); dry run by default
+│   ├── live-setup/             its code, tests and pinned @near-js/* dependencies (own package.json + pnpm lockfile)
 │   └── lib/seed-keys.mjs
 ├── apps/ charts/ envs/ platform/ secrets/   post-v1 GitOps layout (empty until then)
 └── .github/workflows/ci.yml
@@ -54,6 +56,7 @@ nearpay-deploy/
 | `scripts/seed.sh data`        | Demo merchant (test mode), merchant-demo key + webhook endpoint, demo agent funded in the sandbox |
 | `scripts/seed.sh live`        | Check owner-provided mainnet credentials in `.secrets/live/` and generate the overlay `up.sh` uses |
 | `scripts/seed.sh keys`        | Create missing test-only secrets; `--renew-tls` regenerates the certificate (e.g. after mkcert)   |
+| `node scripts/live-setup.mjs` | Mainnet on-chain status of the live accounts; `--apply` sends the missing setup transactions       |
 | `docker compose -p nearpay logs -f <service>` | Follow a container's logs                                                         |
 
 **What starts.** The platform always: Traefik (gateway, TLS, ForwardAuth to identity), Postgres 17 with one database and two roles per service, NATS JetStream, Valkey, the Smokescreen egress proxy, nginx for the static sites, Mailpit (`https://mail.nearpay.localhost`) and the package registry (`http://127.0.0.1:4873`). Each NearPay service has a Compose profile named after it and joins once `../nearpay-<service>/Dockerfile` exists: its image is built from that repository, `migrate-<service>` applies migrations with the migrator role, then its processes start with the app role and must turn healthy. `up.sh` lists the services that are not built yet.
@@ -71,6 +74,32 @@ nearpay-deploy/
 | `relayer_key_1` … `relayer_key_4` | agentpay batcher: function-call keys of `NP_RELAYER_ACCOUNT` on `intents.near` (near-cli JSON or `ed25519:…`) | live agent payments and checkout Intents relays stay off |
 
 Accounts and RPCs go in `compose/env/local.env`: `NP_TREASURY_ACCOUNT`, `NP_RELAYER_ACCOUNT`, `NP_EVM_RPC_URLS_8453` / `_42161` (comma-separated, your own keys preferred), `NP_NEAR_RPC_URLS`.
+
+**Live on-chain setup.** Before the first live run, `scripts/live-setup.mjs` checks and, with `--apply`, prepares the
+mainnet side: the relayer's function-call keys and the agent's NEAR Intents USDC. It reads
+`.secrets/accounts/{treasury,relayer,merchant,agent}.json` (near-cli JSON) and `.secrets/live/relayer_key_1..4`, and
+the RPCs from `NP_NEAR_RPC_URLS` in `compose/env/local.env` (the first that answers). Every path has a flag (`--help`).
+
+```sh
+pnpm -C scripts/live-setup install --frozen-lockfile   # once: pinned @near-js/* 2.5.1, no install scripts run
+node scripts/live-setup.mjs                            # dry run: status + next steps (who to fund, how much)
+node scripts/live-setup.mjs --apply                    # add the missing relayer keys (prints the tx, asks y/N)
+node scripts/live-setup.mjs --apply --deposit all      # also move the agent's native USDC into intents.near
+```
+
+- **Dry run** (the default) only reads: each account's existence and NEAR balance, which `relayer_key_N` are on the relayer
+  and with what permission, the agent's native USDC (`ft_balance_of`) and NEAR Intents USDC (`mt_balance_of` on
+  `intents.near`), and whether `intents.near` knows the agent's and the merchant's key (`has_public_key`).
+- **`--apply`** prints every transaction (signer, key, receiver, actions, deposit, gas) and needs `y` (or `--yes`) before
+  signing. Then it waits for FINAL and prints the `nearblocks.io` link. It never prints private keys and is idempotent: a
+  second run sends nothing. It can send:
+  - (a) one transaction from the relayer's full-access key adding each missing key as a function-call key: receiver
+    `intents.near`, methods `[execute_intents]`, allowance 5 NEAR (the agentpay key policy);
+  - (b) with `--deposit <amount|all>`, the agent's `ft_transfer_call` of native USDC to `intents.near`, with `msg` = the
+    agent's own account id (1 yoctoNEAR, 100 Tgas; `storage_deposit` first if `intents.near` is not registered on the token);
+  - (c) `intents.near` `add_public_key` only where `has_public_key` is false. For implicit accounts it is true by default,
+    so this step is normally skipped.
+- **Tests** run offline against a fake RPC and fixture keys: `pnpm -C scripts/live-setup test`.
 
 **TLS.** With [mkcert](https://github.com/FiloSottile/mkcert) installed the certificate is trusted by browsers (run `mkcert -install` once); otherwise a self-signed local CA is generated and browsers warn — passkeys (WebAuthn) need the trusted certificate.
 
