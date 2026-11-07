@@ -30,8 +30,12 @@ const NEAR = 10n ** 24n;
 export const FUNDING = Object.freeze({
   /** testbed README "Mainnet demo": relayer with ~1 NEAR for gas (it pays every execute_intents batch). */
   relayerMin: NEAR,
-  /** Agent pays gas for its own ft_transfer_call / add_public_key (100 Tgas ≈ 0.01 NEAR) + account storage. */
-  agentMin: NEAR / 10n,
+  /**
+   * Agent pays gas for its own ft_transfer_call / add_public_key. The chain checks the balance against 100 Tgas at
+   * the pessimistic gas price (about 0.1 NEAR) plus storage before accepting, so 0.1 NEAR was refused on mainnet
+   * (NotEnoughBalance, cost 0.10092); 0.2 NEAR passes.
+   */
+  agentMin: NEAR / 5n,
   /** Merchant needs NEAR only when it must call intents.near add_public_key itself. */
   merchantMin: NEAR / 10n,
   /** testbed README: agent with ~1 USDC in its NEAR Intents balance. */
