@@ -94,9 +94,12 @@ compose() {
     --env-file "$env_file" --env-file "$secrets/public/keys.env" "$@"
 }
 
-# ---- registry: publish spec and kit when missing ---------------------------------------------
+# ---- registry: seed, then build from source what the seed lacks ---------------------------------------------
 say "starting the package registry on $registry"
 compose up -d --wait registry >/dev/null
+# The exact tarballs the lockfiles were resolved against (old contract versions included); see registry-seed/.
+node "$deploy/scripts/lib/registry-seed.mjs" "$registry" "$deploy/registry-seed" "$secrets/registry_password" ||
+  die "seeding the package registry failed"
 
 missing_packages() { # repo → prints name@version of every package not in the registry
   local repo="$1" pkg name version
@@ -122,11 +125,15 @@ publish_repo() {
   say "registry: publishing $repo ($(printf '%s' "$missing" | tr '\n' ' '))"
   local log
   log="$(mktemp)"
+  say "  (building from source; log: $log)"
+  # stdin from /dev/null and no corepack prompt: output goes to the log, so a question would wait unseen.
   if ! (
+    set -e
+    export COREPACK_ENABLE_DOWNLOAD_PROMPT=0
     cd "$work/$repo"
     pnpm install --frozen-lockfile --config.@nearpay:registry="$registry/" --config.@nearpay-internal:registry="$registry/"
     NP_REGISTRY_URL="$registry" NP_REGISTRY_PASSWORD="$(cat "$secrets/registry_password")" node scripts/release-local.mjs --skip-verify
-  ) >"$log" 2>&1; then
+  ) </dev/null >"$log" 2>&1; then
     tail -20 "$log" >&2
     die "publishing $repo failed (full log: $log)"
   fi
