@@ -74,6 +74,17 @@ async function main() {
     writeFileSync(npmrc, `registry=${registry}/\n${registry.replace(/^https?:/, "")}/:_authToken=${await token()}\n`);
     const npm = (args) =>
       execFileSync("npm", [...args, "--userconfig", npmrc, "--registry", `${registry}/`], { env: npmEnv, stdio: "pipe" });
+    // npm 11 refuses to publish a version below the current "latest" without an explicit tag, so publish in
+    // ascending order and tag explicitly: the highest seeded version of each package is "latest".
+    const semver = (v) => v.split(".").map(Number);
+    const cmp = (a, b) => {
+      const [x, y] = [semver(a), semver(b)];
+      for (let i = 0; i < 3; i++) if (x[i] !== y[i]) return x[i] - y[i];
+      return 0;
+    };
+    entries.sort((a, b) => (a.name === b.name ? cmp(a.version, b.version) : a.name < b.name ? -1 : 1));
+    const highest = new Map();
+    for (const e of entries) highest.set(e.name, e.version);
     let added = 0;
     let replaced = 0;
     for (const e of entries) {
@@ -83,7 +94,8 @@ async function main() {
         npm(["unpublish", `${e.name}@${e.version}`, "--force"]);
         replaced++;
       }
-      npm(["publish", e.file, "--access", "public"]);
+      const tag = highest.get(e.name) === e.version ? "latest" : `seed-${e.version}`;
+      npm(["publish", e.file, "--access", "public", "--tag", tag]);
       added++;
     }
     console.log(`registry seed: ${entries.length} tarballs, ${added - replaced} published, ${replaced} replaced`);
