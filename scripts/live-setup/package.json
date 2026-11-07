@@ -1,0 +1,26 @@
+{
+  "name": "@nearpay-internal/live-setup",
+  "version": "0.1.0",
+  "private": true,
+  "description": "One-time mainnet on-chain setup for the NearPay live demo (relayer keys, agent Intents deposit). Dry run by default.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "status": "node ../live-setup.mjs",
+    "test": "node --test --test-reporter=spec \"test/*.test.mjs\""
+  },
+  "dependencies": {
+    "@near-js/crypto": "2.5.1",
+    "@near-js/keystores": "2.5.1",
+    "@near-js/signers": "2.5.1",
+    "@near-js/transactions": "2.5.1",
+    "@near-js/types": "2.5.1",
+    "@near-js/utils": "2.5.1"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": []
+  }
+}
