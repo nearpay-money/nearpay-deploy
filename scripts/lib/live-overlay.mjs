@@ -3,7 +3,7 @@
  * Live (mainnet) credentials → a Compose overlay with only what the owner provided (ADR-0015/0016:
  * credentials are human-provided; nothing here creates or signs anything). Reads .secrets/live/:
  *
- *   oneclick_api_key        1Click JWT (rails; without it 1Click quotes carry its unauthenticated fee)
+ *   oneclick_api_key        1Click JWT (rails + sentinel; without it 1Click quotes carry its unauthenticated fee)
  *   explorer_token          NEAR Intents Explorer JWT (rails Explorer feed; also set NP_EXPLORER_ENABLED=true)
  *   relayer_key_1 … _4      function-call keys of NP_RELAYER_ACCOUNT on intents.near (agentpay batcher):
  *                           near-cli JSON ({"account_id","public_key","private_key"}) or "ed25519:<base58>"
@@ -34,8 +34,9 @@ const summary = [];
 if (existsSync(join(dir, "oneclick_api_key"))) {
   const v = read("oneclick_api_key");
   if (!/^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(v)) problems.push("oneclick_api_key: expected a JWT (three base64url parts)");
-  for (const s of ["rails-api", "rails-tracker", "rails-feeds"]) add(s, "NP_ONECLICK_API_KEY_FILE", "oneclick_api_key");
-  summary.push("1Click API key: present");
+  // sentinel looks up deposit addresses on 1Click itself (lld/sentinel.md §9), with the same partner key here
+  for (const s of ["rails-api", "rails-tracker", "rails-feeds", "sentinel-api", "sentinel-auditor"]) add(s, "NP_ONECLICK_API_KEY_FILE", "oneclick_api_key");
+  summary.push("1Click API key: present (rails + sentinel)");
 } else summary.push("1Click API key: absent (quotes use 1Click's unauthenticated fee)");
 
 if (existsSync(join(dir, "explorer_token"))) {
