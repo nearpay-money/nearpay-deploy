@@ -15,6 +15,11 @@ jobs:
           node-version: 22
       - name: Shell scripts
         run: shellcheck scripts/*.sh compose/init/postgres/roles.sh
+      - name: Live setup script (offline unit tests)
+        run: |
+          npm install -g pnpm@9.15.9
+          pnpm -C scripts/live-setup install --frozen-lockfile
+          pnpm -C scripts/live-setup test
       - name: Seed throwaway test keys
         run: scripts/seed.sh keys
       - name: Compose configuration (every profile)
