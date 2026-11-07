@@ -1,13 +1,17 @@
 #!/usr/bin/env bash
 # Starts the NearPay stack with Docker Compose (lld/platform.md §1).
 #
-#   scripts/up.sh [local] [--no-build]   (--no-build reuses existing images)
+#   scripts/up.sh [local] [--no-build] [--build-sites]
+#     --no-build      reuses existing images
+#     --build-sites   rebuilds the checkout, dashboard and js loader even when their output is current
 #
 # 1. seeds local test-only secrets and the TLS certificate (scripts/seed.sh keys);
-# 2. starts the package registry and publishes nearpay-spec and nearpay-kit to it when the versions in
-#    those repositories are missing (services install them from there, ADR-0001);
-# 3. builds the image of every NearPay service whose repository already has a Dockerfile;
-# 4. starts the platform (Traefik, Postgres + roles, NATS, Valkey, egress proxy, static sites, Mailpit)
+# 2. starts the package registry, seeds it with the tarballs in registry-seed/ and publishes nearpay-spec,
+#    nearpay-kit, nearpay-node and nearpay-agentkit from source when a version is still missing (ADR-0001);
+# 3. builds the static web apps (nearpay-js, nearpay-checkout, nearpay-dashboard) whose dist is missing
+#    or older than the repository's HEAD commit;
+# 4. builds the image of every NearPay service whose repository already has a Dockerfile;
+# 5. starts the platform (Traefik, Postgres + roles, NATS, Valkey, egress proxy, static sites, Mailpit)
 #    and those services, then waits until everything is healthy.
 # Services without a Dockerfile yet are listed as skipped. The server profile arrives in Stage 5.
 set -euo pipefail
@@ -25,14 +29,16 @@ say() { printf '%s\n' "$*"; }
 die() { printf 'up: %s\n' "$*" >&2; exit 1; }
 
 build=1
+build_sites=0
 for arg in "$@"; do
   case "$arg" in
     local) ;; # the only profile until Stage 5
     server) die "the server profile arrives in Stage 5 (lld/platform.md §5)" ;;
     --observability) die "the observability profile arrives in Stage 5 (lld/platform.md §5)" ;;
     --no-build) build=0 ;;
-    -h | --help) sed -n '2,14p' "$0"; exit 0 ;;
-    *) die "unknown argument '$arg' (usage: scripts/up.sh [local] [--no-build])" ;;
+    --build-sites) build_sites=1 ;;
+    -h | --help) sed -n '2,16p' "$0"; exit 0 ;;
+    *) die "unknown argument '$arg' (usage: scripts/up.sh [local] [--no-build] [--build-sites])" ;;
   esac
 done
 
@@ -63,17 +69,6 @@ export NP_PORT_SUFFIX=""
 registry_port="${NP_REGISTRY_PORT:-$(envval NP_REGISTRY_PORT)}"
 registry_port="${registry_port:-4873}"
 registry="http://127.0.0.1:$registry_port"
-
-# Static sites: a repository's build output when it exists, otherwise the placeholder page.
-for entry in "${SITES[@]}"; do
-  site="${entry%%:*}" build_dir="$work/${entry#*:}"
-  var="NP_SITE_$(printf '%s' "$site" | tr '[:lower:]' '[:upper:]')"
-  if [ -f "$build_dir/index.html" ] || { [ "$site" = js ] && [ -d "$build_dir/v1" ]; }; then
-    export "$var=$build_dir"
-  else
-    export "$var=$compose_dir/static/placeholder"
-  fi
-done
 
 # Services join once their repository has a Dockerfile (agreed "auto-detect" behaviour).
 profiles=()
@@ -127,6 +122,7 @@ publish_repo() {
   log="$(mktemp)"
   say "  (building from source; log: $log)"
   # stdin from /dev/null and no corepack prompt: output goes to the log, so a question would wait unseen.
+  # shellcheck disable=SC2030 # the export is meant to stay in the subshell (also in build_site)
   if ! (
     set -e
     export COREPACK_ENABLE_DOWNLOAD_PROMPT=0
@@ -143,6 +139,63 @@ publish_repo nearpay-spec
 publish_repo nearpay-kit
 # client packages the merchant demo installs (@nearpay/node, @nearpay/x402, @nearpay/agent-signer)
 for repo in nearpay-node nearpay-agentkit; do [ -d "$work/$repo" ] && publish_repo "$repo"; done
+
+# ---- static web apps -------------------------------------------------------------------------
+# nginx serves these repositories' build output (SITES). Each is built here when its output is missing,
+# older than the repository's HEAD commit or (checkout) missing the current sentinel keys, or with --build-sites.
+# The checkout build pins .secrets/public/sentinel_keys.json (its build/config.ts), written by
+# `seed.sh keys` above. Entries are repo:output file that marks a finished build.
+WEB_APPS=(nearpay-js:dist/v1/nearpay.js nearpay-checkout:dist/index.html nearpay-dashboard:dist/index.html)
+mtime() { node -p 'Math.floor(require("fs").statSync(process.argv[1]).mtimeMs / 1000)' "$1" 2>/dev/null || echo 0; }
+site_stale() { # repo, output file → succeeds when the output must be (re)built
+  local repo="$1" out="$work/$1/$2" built head key
+  [ -f "$out" ] || return 0
+  built="$(mtime "$out")"
+  head="$(git -C "$work/$repo" log -1 --format=%ct 2>/dev/null || echo 0)"
+  [ "$built" -ge "${head:-0}" ] || return 0
+  if [ "$repo" = nearpay-checkout ]; then # it must pin the current sentinel keys (seed.sh rewrites the file each run)
+    for key in $(node -p 'require(process.argv[1]).map((k) => k.public_key).join("\n")' "$secrets/public/sentinel_keys.json"); do
+      grep -rqF -- "$key" "$work/$repo/dist/assets" || return 0
+    done
+  fi
+  return 1
+}
+build_site() {
+  local repo="$1" log
+  log="$(mktemp)"
+  say "building $repo (log: $log)"
+  # same as publish_repo: stdin from /dev/null and no corepack prompt, because output goes to the log.
+  # shellcheck disable=SC2031 # the export is meant to stay in the subshell
+  if ! (
+    set -e
+    export COREPACK_ENABLE_DOWNLOAD_PROMPT=0
+    cd "$work/$repo"
+    pnpm install --frozen-lockfile --config.@nearpay:registry="$registry/" --config.@nearpay-internal:registry="$registry/"
+    pnpm build
+  ) </dev/null >"$log" 2>&1; then
+    tail -20 "$log" >&2
+    die "building $repo failed (full log: $log)"
+  fi
+  rm -f "$log"
+}
+[ -f "$secrets/public/sentinel_keys.json" ] || die "missing $secrets/public/sentinel_keys.json (scripts/seed.sh keys)"
+sites_built=0
+for entry in "${WEB_APPS[@]}"; do
+  repo="${entry%%:*}"
+  [ -d "$work/$repo" ] || continue # not cloned: its site keeps the placeholder
+  if [ "$build_sites" = 1 ] || site_stale "$repo" "${entry#*:}"; then build_site "$repo"; sites_built=1; fi
+done
+
+# Static sites: a repository's build output when it exists, otherwise the placeholder page.
+for entry in "${SITES[@]}"; do
+  site="${entry%%:*}" build_dir="$work/${entry#*:}"
+  var="NP_SITE_$(printf '%s' "$site" | tr '[:lower:]' '[:upper:]')"
+  if [ -f "$build_dir/index.html" ] || { [ "$site" = js ] && [ -d "$build_dir/v1" ]; }; then
+    export "$var=$build_dir"
+  else
+    export "$var=$compose_dir/static/placeholder"
+  fi
+done
 
 # ---- images ----------------------------------------------------------------------------------
 # Built here rather than by Compose: the build must reach the registry on the host's loopback
@@ -170,6 +223,11 @@ fi
 
 # ---- stack -----------------------------------------------------------------------------------
 if [ "${#enabled[@]}" -gt 0 ]; then say "starting the platform and ${#enabled[@]} service(s): ${enabled[*]}"; else say "starting the platform"; fi
+# A site build replaces its dist directory (nearpay-js deletes it) and a running nginx keeps its bind mount
+# of the old one, so recreate the static container first; the full `up` below then leaves it alone.
+if [ "$sites_built" = 1 ]; then
+  compose up -d --wait --no-deps --force-recreate static >/dev/null || die "starting the static sites failed"
+fi
 up_args=(up -d --wait --remove-orphans)
 [ "$build" = 1 ] && up_args+=(--build)
 # ${a[@]+"${a[@]}"}: empty arrays are "unbound" under set -u in bash 3.2 (macOS).
