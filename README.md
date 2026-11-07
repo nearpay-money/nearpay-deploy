@@ -37,12 +37,13 @@ nearpay-deploy/
 │   ├── egress-proxy/           Smokescreen image (pinned release)
 │   └── registry/config.yaml    Verdaccio for @nearpay/* and @nearpay-internal/*
 ├── scripts/
-│   ├── up.sh                   seed → registry → publish spec/kit if missing → build images → start, wait healthy
+│   ├── up.sh                   keys → registry seed + publish if missing → build web apps → build images → start, wait healthy
 │   ├── down.sh                 stop (add --volumes to delete local data)
 │   ├── seed.sh                 keys: test-only secrets and TLS certificate into .secrets/ (git-ignored)
 │   ├── live-setup.mjs          one-time mainnet on-chain setup (relayer keys, agent Intents deposit); dry run by default
 │   ├── live-setup/             its code, tests and pinned @near-js/* dependencies (own package.json + pnpm lockfile)
-│   └── lib/seed-keys.mjs
+│   └── lib/                    seed-keys.mjs, registry-seed.mjs
+├── registry-seed/              exact @nearpay* tarballs the lockfiles resolve to (published by up.sh)
 ├── apps/ charts/ envs/ platform/ secrets/   post-v1 GitOps layout (empty until then)
 └── .github/workflows/ci.yml
 ```
@@ -51,7 +52,7 @@ nearpay-deploy/
 
 | Command                       | What it does                                                                                     |
 | ----------------------------- | ------------------------------------------------------------------------------------------------ |
-| `scripts/up.sh local`         | Start everything that is built; `--no-build` skips image builds                                  |
+| `scripts/up.sh local`         | Start everything that is built; `--no-build` skips image builds, `--build-sites` forces web-app builds |
 | `scripts/down.sh`             | Stop the stack; `--volumes` also deletes Postgres, NATS, Valkey and registry data                 |
 | `scripts/seed.sh data`        | Demo merchant (test mode), merchant-demo key + webhook endpoint, demo agent funded in the sandbox |
 | `scripts/seed.sh live`        | Check owner-provided mainnet credentials in `.secrets/live/` and generate the overlay `up.sh` uses |
@@ -62,6 +63,16 @@ nearpay-deploy/
 **What starts.** The platform always: Traefik (gateway, TLS, ForwardAuth to identity), Postgres 17 with one database and two roles per service, NATS JetStream, Valkey, the Smokescreen egress proxy, nginx for the static sites, Mailpit (`https://mail.nearpay.localhost`) and the package registry (`http://127.0.0.1:4873`). Each NearPay service has a Compose profile named after it and joins once `../nearpay-<service>/Dockerfile` exists: its image is built from that repository, `migrate-<service>` applies migrations with the migrator role, then its processes start with the app role and must turn healthy. `up.sh` lists the services that are not built yet.
 
 **Images.** `up.sh` builds `nearpay/<service>:local` from each built repository with `docker build --network host --build-arg NP_REGISTRY_URL=http://127.0.0.1:4873`, after publishing `nearpay-spec` and `nearpay-kit` to the registry whenever a version in those repositories is missing; Compose never builds or pulls service images. Service Dockerfiles therefore install `@nearpay/*` and `@nearpay-internal/*` from `$NP_REGISTRY_URL`, run `node dist/main.js <process>` (api, worker, …) and declare `HEALTHCHECK` with `dist/main.js healthcheck` (`@nearpay-internal/service`).
+
+**Registry.** `up.sh` starts Verdaccio, then publishes every tarball in `registry-seed/` byte for byte (the exact
+versions the lockfiles resolve to, checked against `SHA512SUMS`), and builds `nearpay-spec`, `nearpay-kit`,
+`nearpay-node` and `nearpay-agentkit` from source only for versions still missing. See `registry-seed/README.md`.
+
+**Web apps.** nginx serves `nearpay-checkout/dist` (pay), `nearpay-dashboard/dist` and `nearpay-js/dist` (`/v1/nearpay.js`)
+from the sibling repositories. `up.sh` runs `pnpm install --frozen-lockfile && pnpm build` in each one whose output is
+missing or older than its HEAD commit (and the checkout when it does not pin the current
+`.secrets/public/sentinel_keys.json`), then recreates the static container; `--build-sites` rebuilds all three.
+Build logs go to a temp file named in the output. Sites without a build (console, docs) show a placeholder page.
 
 **Secrets.** `seed.sh keys` writes test-only material to `.secrets/` (mode 0700, never committed): database URLs per role, Ed25519 keys (internal JWT current/next, sentinel, payments ticket, webhooks, sandbox), service-client secrets and identity's hashed list, a KEK per service, the Turnstile test secret and the registry password; public keys go to `.secrets/public/` (`keys.env` for Compose, `sentinel_keys.json` for static builds). Existing files are never overwritten. Live credentials (1Click key, Explorer token, treasury and relayer keys) are added by the owner and stay out of git.
 
