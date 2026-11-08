@@ -22,6 +22,14 @@ x-node-service: &node-service
   cap_drop: [ALL]
   security_opt: [no-new-privileges:true]
   stop_grace_period: 35s # the service drains for up to 30 s
+  # The images' HEALTHCHECK (`node dist/main.js healthcheck`, every 5 s) boots a Node process per check: ~28
+  # containers on a 2-CPU machine spent the CPU on health checks alone and timed out in a loop (step 2.4).
+  # Same test, slower cadence.
+  healthcheck:
+    interval: 15s
+    timeout: 10s
+    start_period: 30s
+    retries: 8
   logging: *logging
 
 # One-shot migrators (`migrate-<svc>`): migrator role, data network only.
