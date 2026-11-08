@@ -1,0 +1,13 @@
+# Operator (console) passkey AAGUID allow-list for the LOCAL stack (identity §11, NP_OPS_AAGUID_ALLOWLIST_FILE).
+# One AAGUID per line, `#` comments. An empty list refuses every key (fail closed).
+#
+# Software / virtual authenticators: identity honours these two only when NP_ENV is local or test, so this file
+# is harmless if copied elsewhere. They let the testbed's CDP virtual authenticator (and Chrome DevTools'
+# WebAuthn panel) enrol operators on a local stack.
+00000000-0000-0000-0000-000000000000
+01020304-0506-0708-0102-030405060708
+#
+# Hardware keys an operator uses against a local stack can be added below (the server stage ships its own list
+# plus NP_OPS_ATTESTATION_ROOTS_FILE). YubiKey 5 series (FIDO2), for example:
+# cb69481e-8ff7-4039-93ec-0a2729a154a8
+# ee882879-721c-4913-9775-3dfcce97072a

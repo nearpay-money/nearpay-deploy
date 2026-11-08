@@ -34,8 +34,10 @@ x-migrate: &migrate
     postgres-init: { condition: service_completed_successfully }
 
 # Wiring every service shares (foundations §13); tunables keep the defaults in each service's LLD.
+# NP_ENV has no default anywhere (kit 0.2.1 refuses to boot without it): local/test enable development
+# relaxations, so each profile sets it explicitly (local stack: compose/env/local.env, NP_ENV=local).
 x-env: &env
-  NP_ENV: ${NP_ENV:-local}
+  NP_ENV: ${NP_ENV:?set NP_ENV explicitly in compose/env/local.env (local stack - local)}
   NP_LOG_LEVEL: ${NP_LOG_LEVEL:-info}
   NP_OTEL_ENDPOINT: ${NP_OTEL_ENDPOINT:-}
   NP_NATS_URL: nats://nats:4222
@@ -54,6 +56,12 @@ x-env: &env
   NP_PUBLIC_API_URL: https://api.${NP_BASE_DOMAIN:-nearpay.localhost}${NP_PORT_SUFFIX:-}
   NP_PAY_ORIGIN: https://pay.${NP_BASE_DOMAIN:-nearpay.localhost}${NP_PORT_SUFFIX:-}
   NP_DASHBOARD_ORIGIN: https://dashboard.${NP_BASE_DOMAIN:-nearpay.localhost}${NP_PORT_SUFFIX:-}
+  NP_OPS_ORIGIN: https://ops.${NP_BASE_DOMAIN:-nearpay.localhost}${NP_PORT_SUFFIX:-}
+  NP_CONSOLE_ORIGIN: https://ops.${NP_BASE_DOMAIN:-nearpay.localhost}${NP_PORT_SUFFIX:-}
+
+# Fiat pricing currencies (ADR-0020 d5): payments accepts them, rails prices them (ECB FX; test mode: NP_TEST_FX_RATES).
+x-pricing-env: &pricing-env
+  NP_PRICING_CURRENCIES: ${NP_PRICING_CURRENCIES:-usd,eur,gbp,chf,jpy,cad,aud}
 
 x-chain-env: &chain-env
   NP_NEAR_RPC_URLS: ${NP_NEAR_RPC_URLS:-https://rpc.mainnet.near.org,https://free.rpc.fastnear.com}
@@ -73,6 +81,14 @@ volumes:
   natsdata: {}
   valkeydata: {}
   billing-invoices: {}
+  rails-obs-archive: {} # rails observation archive (NP_OBS_ARCHIVE_STORE=file:/data/obs-archive, rails §8.11)
+
+# Non-secret files mounted read-only into services.
+configs:
+  # Hardware-key AAGUIDs accepted for operator (console) passkeys (identity §11). The local file also allows the
+  # CDP / software virtual authenticator, which identity honours only when NP_ENV is local or test.
+  ops_aaguid_allowlist:
+    file: ${NP_OPS_AAGUID_ALLOWLIST_FILE:-./identity/ops-aaguids.local.txt}
 
 secrets:
   postgres_password: { file: ../.secrets/postgres_password }
@@ -172,7 +188,6 @@ services:
       - ${NP_SITE_PAY:-./static/placeholder}:/sites/pay:ro
       - ${NP_SITE_JS:-./static/placeholder}:/sites/js:ro
       - ${NP_SITE_DASHBOARD:-./static/placeholder}:/sites/dashboard:ro
-      - ${NP_SITE_OPS:-./static/placeholder}:/sites/ops:ro
       - ${NP_SITE_DOCS:-./static/placeholder}:/sites/docs:ro
     networks: [edge]
     healthcheck:
@@ -180,6 +195,19 @@ services:
       interval: 5s
       timeout: 3s
       retries: 12
+    logging: *logging
+
+  # ops.<domain>: nearpay-console's image (Vite build on unprivileged nginx, its own headers and CSP), built by up.sh
+  # from ../nearpay-console like the service images; Traefik routes the host's pages here and /api/ops/* to services.
+  console:
+    image: nearpay/console:${NP_IMAGE_TAG:-local}
+    profiles: [console]
+    restart: unless-stopped
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    networks: [edge]
     logging: *logging
 
   postgres:
@@ -230,6 +258,17 @@ services:
     networks: [data]
     depends_on:
       postgres: { condition: service_healthy }
+    logging: *logging
+
+  # Named volumes start root-owned; NearPay containers run as 10001 on a read-only root FS, so the writable
+  # data volumes are handed to that user once per `up` (idempotent).
+  volume-init:
+    image: postgres:17.11
+    restart: "no"
+    user: "0:0"
+    network_mode: none
+    entrypoint: [chown, "10001:10001", /vol/rails-obs-archive]
+    volumes: [rails-obs-archive:/vol/rails-obs-archive]
     logging: *logging
 
   nats:
@@ -304,6 +343,11 @@ services:
       NP_WEBAUTHN_ORIGINS: https://dashboard.${NP_BASE_DOMAIN:-nearpay.localhost}${NP_PORT_SUFFIX:-},https://ops.${NP_BASE_DOMAIN:-nearpay.localhost}${NP_PORT_SUFFIX:-}
       NP_COOLOFF_SECONDS: ${NP_COOLOFF_SECONDS:-86400}
       NP_NEAR_RPC_URLS: ${NP_NEAR_RPC_URLS:-https://rpc.mainnet.near.org,https://free.rpc.fastnear.com}
+      # console (step 2.1/2.2): operator passkeys; RP id = host of NP_OPS_ORIGIN (x-env). The server stage adds
+      # NP_OPS_ATTESTATION_ROOTS_FILE (vendor attestation roots, required there).
+      NP_OPS_AAGUID_ALLOWLIST_FILE: /etc/nearpay/ops-aaguids.txt
+    configs:
+      - { source: ops_aaguid_allowlist, target: /etc/nearpay/ops-aaguids.txt }
     secrets:
       - db_url_identity
       - service_client_identity
@@ -338,15 +382,21 @@ services:
     profiles: [payments]
     command: [dist/main.js, api]
     environment:
-      <<: *env
+      <<: [*env, *pricing-env]
       NP_SERVICE: payments
       NP_DB_URL_FILE: /run/secrets/db_url_payments
       NP_SERVICE_CLIENT_SECRET_FILE: /run/secrets/service_client_payments
       NP_PII_KEK_FILE: /run/secrets/kek_payments
       NP_TICKET_SIGNING_KEY_FILE: /run/secrets/payments_ticket_key
       NP_TURNSTILE_SECRET_FILE: /run/secrets/turnstile_secret
+      # Verifier current_salt for live refund legs signed from an Intents account (payments §8.4)
+      NP_NEAR_RPC_URLS: ${NP_NEAR_RPC_URLS:-https://rpc.mainnet.near.org,https://free.rpc.fastnear.com}
+      # payment-link session limiter (payments §19.1): per client network, per link + client network, per link
+      NP_LINK_SESSIONS_PER_IP: ${NP_LINK_SESSIONS_PER_IP:-10}
+      NP_LINK_SESSIONS_PER_LINK_CLIENT: ${NP_LINK_SESSIONS_PER_LINK_CLIENT:-5}
+      NP_LINK_SESSIONS_PER_LINK: ${NP_LINK_SESSIONS_PER_LINK:-600}
     secrets: [db_url_payments, service_client_payments, kek_payments, payments_ticket_key, turnstile_secret]
-    networks: [internal, data, egress] # egress: Turnstile siteverify (payments LLD §8.2)
+    networks: [internal, data, egress] # egress: Turnstile siteverify (payments LLD §8.2), NEAR RPC (refund legs)
     depends_on:
       migrate-payments: { condition: service_completed_successfully }
       nats: { condition: service_healthy }
@@ -374,20 +424,32 @@ services:
     profiles: [rails]
     command: [dist/main.js, api]
     environment:
-      <<: [*env, *chain-env]
+      <<: [*env, *chain-env, *pricing-env]
       NP_SERVICE: rails
       NP_DB_URL_FILE: /run/secrets/db_url_rails
       NP_SERVICE_CLIENT_SECRET_FILE: /run/secrets/service_client_rails
       NP_NEARDATA_URL: ${NP_NEARDATA_URL:-https://mainnet.neardata.xyz}
       NP_EXPLORER_ENABLED: ${NP_EXPLORER_ENABLED:-false}
-      NP_PRICING_CURRENCIES: ${NP_PRICING_CURRENCIES:-usd}
       NP_EVM_RPC_URLS_1: ${NP_EVM_RPC_URLS_1:-}
       NP_EVM_RPC_URLS_8453: ${NP_EVM_RPC_URLS_8453:-}
       NP_EVM_RPC_URLS_42161: ${NP_EVM_RPC_URLS_42161:-}
+      # Internet hosts rails calls (the server stage's egress allow-list): 1click.chaindefuser.com, the NEAR/EVM RPCs,
+      # mainnet.neardata.xyz, explorer.near-intents.org (Explorer, opt-in), api.coingecko.com (secondary prices) and
+      # www.ecb.europa.eu (FX). The local `egress` network is not filtered per host; only webhook deliveries are
+      # (Smokescreen).
+      # pricing and FX (rails §8.2, ADR-0020): ECB daily rates + CoinGecko keyless secondary prices in live mode;
+      # test mode prices from NP_TEST_FX_RATES (empty: the service's fixed table). JSON values live in local.env.
+      NP_STABLE_PEGS: ${NP_STABLE_PEGS:-}
+      NP_TEST_FX_RATES: ${NP_TEST_FX_RATES:-}
+      # observation archive (rails §8.11): files under the rails-obs-archive volume
+      NP_OBS_ARCHIVE_STORE: ${NP_OBS_ARCHIVE_STORE:-file:/data/obs-archive}
+      NP_OBS_ARCHIVE_AFTER_DAYS: ${NP_OBS_ARCHIVE_AFTER_DAYS:-90}
     secrets: [db_url_rails, service_client_rails]
+    volumes: [rails-obs-archive:/data/obs-archive]
     networks: [internal, data, egress]
     depends_on:
       migrate-rails: { condition: service_completed_successfully }
+      volume-init: { condition: service_completed_successfully }
       nats: { condition: service_healthy }
       compliance-api: { condition: service_healthy, required: false }
 
@@ -453,8 +515,8 @@ services:
       NP_DB_URL_FILE: /run/secrets/db_url_compliance
       NP_SERVICE_CLIENT_SECRET_FILE: /run/secrets/service_client_compliance
       NP_PII_KEK_FILE: /run/secrets/kek_compliance
-      NP_SCREENING_VENDOR: ${NP_SCREENING_VENDOR:-none}
-      NP_KYB_VENDOR: ${NP_KYB_VENDOR:-manual}
+      # local screening against the OFAC SDN list + blocklist (no vendor, ADR-0020); KYB is self-declared (no vendor)
+      NP_SCREENING_PROVIDER: ${NP_SCREENING_PROVIDER:-local}
       # OFAC SDN list: downloaded on the worker's first start and daily at 03:00 UTC (SP-15); set false
       # offline and load a file with `ops.js sanctions-import - < SDN_ADVANCED.XML`.
       NP_SANCTIONS_REFRESH: ${NP_SANCTIONS_REFRESH:-true}
@@ -538,6 +600,7 @@ services:
       NP_SECURITY_CONTACTS: ${NP_SECURITY_CONTACTS:-}
       # customer receipts for test-mode payments: on locally (Mailpit catches every mail), off on servers
       NP_TEST_MODE_RECEIPTS: ${NP_TEST_MODE_RECEIPTS:-true}
+      # link targets: NP_DASHBOARD_ORIGIN (merchant mails) and NP_CONSOLE_ORIGIN (ops approval mails) come from x-env
     secrets: [db_url_notify, service_client_notify, kek_notify]
     networks: [internal, data, egress]
     depends_on:

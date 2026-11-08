@@ -3,6 +3,7 @@
 # (identity /internal/authz), which mints the internal request token. The dashboard and checkout
 # call the API same-origin under /api (prefix stripped), so the API needs no CORS. /internal/* is
 # never routed. Router priorities are explicit: narrower prefixes owned by another service win.
+# The console host's API routers (ops.<domain>/api/ops/*) are generated from the spec into ops.yaml.
 {{- $d := env "NP_BASE_DOMAIN" }}
 http:
   routers:
@@ -20,6 +21,15 @@ http:
       rule: '(Host(`api.{{ $d }}`) && (Path(`/v1/checkout`) || PathPrefix(`/v1/checkout/`) || Path(`/v1/payment_intents`) || PathPrefix(`/v1/payment_intents/`) || Path(`/v1/refunds`) || PathPrefix(`/v1/refunds/`) || Path(`/v1/payment_links`) || PathPrefix(`/v1/payment_links/`) || Path(`/v1/customers`) || PathPrefix(`/v1/customers/`) || Path(`/v1/balance_transactions`) || PathPrefix(`/v1/balance_transactions/`) || Path(`/v1/test_helpers`) || PathPrefix(`/v1/test_helpers/`))) || ((Host(`pay.{{ $d }}`) || Host(`dashboard.{{ $d }}`)) && (Path(`/api/v1/checkout`) || PathPrefix(`/api/v1/checkout/`) || Path(`/api/v1/payment_intents`) || PathPrefix(`/api/v1/payment_intents/`) || Path(`/api/v1/refunds`) || PathPrefix(`/api/v1/refunds/`) || Path(`/api/v1/payment_links`) || PathPrefix(`/api/v1/payment_links/`) || Path(`/api/v1/customers`) || PathPrefix(`/api/v1/customers/`) || Path(`/api/v1/balance_transactions`) || PathPrefix(`/api/v1/balance_transactions/`) || Path(`/api/v1/test_helpers`) || PathPrefix(`/api/v1/test_helpers/`)))'
       priority: 100
       middlewares: [strip-internal-headers, api-prefix, authz, api-headers]
+      service: payments
+    # Anonymous payment-link pages (payments §6.2): GET|POST /v1/payment_links/{id}/public/** need no credential
+    # (identity's allow-list = spec PUBLIC_ANONYMOUS_ROUTES); the gateway adds a per-IP limit in front of
+    # payments' own session limiter (§19.1). Priority above the payments router.
+    payments-links-public:
+      entryPoints: [websecure]
+      rule: '(Host(`api.{{ $d }}`) && (Method(`GET`) || Method(`POST`)) && PathRegexp(`^/v1/payment_links/[^/]+/public(/.*)?$`)) || ((Host(`pay.{{ $d }}`) || Host(`dashboard.{{ $d }}`)) && (Method(`GET`) || Method(`POST`)) && PathRegexp(`^/api/v1/payment_links/[^/]+/public(/.*)?$`))'
+      priority: 150
+      middlewares: [strip-internal-headers, links-public-ratelimit, api-prefix, authz, api-headers]
       service: payments
     identity:
       entryPoints: [websecure]
@@ -84,11 +94,13 @@ http:
       rule: 'Host(`dashboard.{{ $d }}`)'
       priority: 10
       service: static
+    # nearpay-console's own nginx image (profile console); the API under /api/ops/* is routed by ops.yaml.
     site-ops:
       entryPoints: [websecure]
       rule: 'Host(`ops.{{ $d }}`)'
       priority: 10
-      service: static
+      middlewares: [ops-local-only]
+      service: console
     site-docs:
       entryPoints: [websecure]
       rule: 'Host(`docs.{{ $d }}`)'
@@ -124,6 +136,23 @@ http:
         referrerPolicy: no-referrer
         customResponseHeaders:
           Cache-Control: "no-store"
+    # The console host answers local clients only (the stack publishes its ports on 127.0.0.1; Docker's port
+    # forwarding presents host clients with a bridge-gateway address). The server stage puts Cloudflare Access in front.
+    ops-local-only:
+      ipAllowList:
+        sourceRange: [127.0.0.0/8, "::1/128", 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16]
+    # Anonymous console sign-in (enrolment, passkey ceremonies): per-IP limit before identity's own checks.
+    ops-auth-ratelimit:
+      rateLimit:
+        average: 5
+        burst: 20
+        period: 1s
+    # Anonymous payment-link pages and session creation: per-IP limit before payments' limiter.
+    links-public-ratelimit:
+      rateLimit:
+        average: 10
+        burst: 40
+        period: 1s
     # sentinel LLD §2: anonymous route, per-IP limit 10 rps.
     sentinel-ratelimit:
       rateLimit:
@@ -162,6 +191,9 @@ http:
     static:
       loadBalancer:
         servers: [{ url: http://static:8080 }]
+    console:
+      loadBalancer:
+        servers: [{ url: http://console:8080 }]
     mailpit:
       loadBalancer:
         servers: [{ url: http://mailpit:8025 }]
