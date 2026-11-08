@@ -272,6 +272,7 @@ services:
   # data volumes are handed to that user once per `up` (idempotent).
   volume-init:
     image: postgres:17.11
+    profiles: [rails]
     restart: "no"
     user: "0:0"
     network_mode: none
