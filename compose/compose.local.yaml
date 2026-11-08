@@ -95,6 +95,7 @@ services:
       payments-api: { condition: service_healthy, required: false }
 
   # ---- NearPay services: images come from scripts/up.sh, never from a registry ----------------
+  console: *local-image
   migrate-identity: *local-image
   identity-api: *local-image
   identity-worker: *local-image

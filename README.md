@@ -32,8 +32,9 @@ nearpay-deploy/
 │   ├── compose.local.yaml      local profile: ports on 127.0.0.1, build contexts, registry, Mailpit, merchant demo
 │   ├── env/local.env.example   non-secret configuration (copied to local.env on first run)
 │   ├── init/postgres/roles.sh  databases and roles per service (idempotent, runs on every up)
-│   ├── traefik/                static config + dynamic/routes.yaml (routers, ForwardAuth, TLS)
-│   ├── static/                 nginx for pay, js, dashboard, ops and docs (+ placeholder page)
+│   ├── traefik/                static config + dynamic/routes.yaml (routers, ForwardAuth, TLS) + dynamic/ops.yaml (generated)
+│   ├── identity/               ops-aaguids.local.txt (console passkey AAGUID allow-list, local)
+│   ├── static/                 nginx for pay, js, dashboard and docs (+ placeholder page); the console has its own image
 │   ├── egress-proxy/           Smokescreen image (pinned release)
 │   └── registry/config.yaml    Verdaccio for @nearpay/* and @nearpay-internal/*
 ├── scripts/
@@ -72,7 +73,9 @@ versions the lockfiles resolve to, checked against `SHA512SUMS`), and builds `ne
 from the sibling repositories. `up.sh` runs `pnpm install --frozen-lockfile && pnpm build` in each one whose output is
 missing or older than its HEAD commit (and the checkout when it does not pin the current
 `.secrets/public/sentinel_keys.json`), then recreates the static container; `--build-sites` rebuilds all three.
-Build logs go to a temp file named in the output. Sites without a build (console, docs) show a placeholder page.
+Build logs go to a temp file named in the output. Sites without a build (docs) show a placeholder page.
+
+**Console (`https://ops.nearpay.localhost`, local clients only).** `nearpay/console:local` is built from `nearpay-console`'s Dockerfile like a service image (profile `console`). Its API `ops.…/api/ops/*` is routed per owning service by `compose/traefik/dynamic/ops.yaml`, generated from the spec's `OPS_ROUTES` (`node scripts/lib/ops-routes.mjs > compose/traefik/dynamic/ops.yaml`; `--check` reports drift). Operators are added with identity's ops CLI (`ops.js operator-add <email> ops|ops_admin`, or `pnpm ops operator-add` in nearpay-testbed); the enrolment link arrives in Mailpit. The local AAGUID list (`compose/identity/ops-aaguids.local.txt`) also allows virtual authenticators, which identity honours only with `NP_ENV=local`/`test`.
 
 **Secrets.** `seed.sh keys` writes test-only material to `.secrets/` (mode 0700, never committed): database URLs per role, Ed25519 keys (internal JWT current/next, sentinel, payments ticket, webhooks, sandbox), service-client secrets and identity's hashed list, a KEK per service, the Turnstile test secret and the registry password; public keys go to `.secrets/public/` (`keys.env` for Compose, `sentinel_keys.json` for static builds). Existing files are never overwritten. Live credentials (1Click key, Explorer token, treasury and relayer keys) are added by the owner and stay out of git.
 

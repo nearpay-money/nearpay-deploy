@@ -94,11 +94,17 @@ case "$cmd" in
     # 1. identity seed-demo: owner, account, test destination and API keys (idempotent on the email);
     #    keys in .secrets/demo.json
     # 2. merchant-demo: its secret key and a webhook endpoint http://merchant-demo:3000/webhooks
-    #    (payment_intent.*, checkout.session.*, agent_payment.*) with its signing secret, in
+    #    (payment_intent.*, checkout.session.*, agent_payment.*, refund.*) with its signing secret, in
     #    .secrets/merchant-demo/ (test-mode values; readable by the container user)
     # 3. sandbox: the demo agent's simulated Intents balance (USDC), topped up to 100 USDC
     running() { docker compose -p nearpay ps --status running --services 2>/dev/null | grep -qx "$1"; }
     running identity-api || die "identity-api is not running (start the stack with scripts/up.sh first)"
+    # identity checks the destination asset against rails' token registry; on a fresh stack rails' first refresh can
+    # run before the sandbox answers (seen on a fresh stack: asset_unsupported), so refresh before seeding.
+    if running rails-api; then
+      docker compose -p nearpay exec -T rails-api /nodejs/bin/node dist/ops.js tokens-refresh >/dev/null ||
+        die "rails tokens-refresh failed"
+    fi
     out="$(docker compose -p nearpay exec -T identity-api /nodejs/bin/node dist/ops.js seed-demo "${@:2}")" ||
       die "identity seed-demo failed"
     (umask 077 && printf '%s\n' "$out" >"$secrets/demo.json")
@@ -121,7 +127,7 @@ case "$cmd" in
       api GET "/v1/webhook_endpoints?limit=100" | grep -q "\"$hook\""; then
       say "merchant-demo webhook endpoint present"
     else
-      events='["payment_intent.created","payment_intent.processing","payment_intent.succeeded","payment_intent.payment_failed","payment_intent.requires_review","payment_intent.overpaid","payment_intent.canceled","checkout.session.completed","checkout.session.expired","agent_payment.settled","agent_payment.failed"]'
+      events='["payment_intent.created","payment_intent.processing","payment_intent.succeeded","payment_intent.payment_failed","payment_intent.requires_review","payment_intent.overpaid","payment_intent.canceled","checkout.session.completed","checkout.session.expired","agent_payment.settled","agent_payment.failed","refund.created","refund.requires_action","refund.pending","refund.succeeded","refund.failed","refund.canceled"]'
       created="$(api POST /v1/webhook_endpoints "{\"url\":\"$hook\",\"enabled_events\":$events,\"description\":\"merchant-demo (seed.sh)\"}")" ||
         die "creating the merchant-demo webhook endpoint failed (is webhooks-api running?)"
       printf '%s' "$created" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>process.stdout.write(JSON.parse(s).secret))' \

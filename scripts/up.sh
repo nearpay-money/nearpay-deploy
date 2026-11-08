@@ -10,7 +10,7 @@
 #    nearpay-kit, nearpay-node and nearpay-agentkit from source when a version is still missing (ADR-0001);
 # 3. builds the static web apps (nearpay-js, nearpay-checkout, nearpay-dashboard) whose dist is missing
 #    or older than the repository's HEAD commit;
-# 4. builds the image of every NearPay service whose repository already has a Dockerfile;
+# 4. builds the image of every NearPay service (and of the console site) whose repository already has a Dockerfile;
 # 5. starts the platform (Traefik, Postgres + roles, NATS, Valkey, egress proxy, static sites, Mailpit)
 #    and those services, then waits until everything is healthy.
 # Services without a Dockerfile yet are listed as skipped. The server profile arrives in Stage 5.
@@ -23,7 +23,9 @@ secrets="$deploy/.secrets"
 env_file="$compose_dir/env/local.env"
 
 SERVICES=(identity payments rails agentpay compliance webhooks notify sandbox sentinel billing)
-SITES=(pay:nearpay-checkout/dist js:nearpay-js/dist dashboard:nearpay-dashboard/dist ops:nearpay-console/dist docs:nearpay-site/dist/docs)
+SITES=(pay:nearpay-checkout/dist js:nearpay-js/dist dashboard:nearpay-dashboard/dist docs:nearpay-site/dist/docs)
+# Web apps that ship their own nginx image (profile = image name): nearpay-console serves ops.<domain>.
+SITE_IMAGES=(console)
 
 say() { printf '%s\n' "$*"; }
 die() { printf 'up: %s\n' "$*" >&2; exit 1; }
@@ -76,6 +78,9 @@ enabled=()
 skipped=()
 for svc in "${SERVICES[@]}"; do
   if [ -f "$work/nearpay-$svc/Dockerfile" ]; then profiles+=(--profile "$svc"); enabled+=("$svc"); else skipped+=("$svc"); fi
+done
+for app in "${SITE_IMAGES[@]}"; do
+  if [ -f "$work/nearpay-$app/Dockerfile" ]; then profiles+=(--profile "$app"); enabled+=("$app"); else skipped+=("$app"); fi
 done
 if [ -f "$work/nearpay-testbed/merchant-demo/Dockerfile" ]; then profiles+=(--profile merchant-demo); enabled+=(merchant-demo); else skipped+=(merchant-demo); fi
 
@@ -242,6 +247,7 @@ say "NearPay is up (TLS: $tls_mode)."
 say "  API health      https://api.$NP_BASE_DOMAIN$NP_PORT_SUFFIX/healthz"
 say "  checkout        https://pay.$NP_BASE_DOMAIN$NP_PORT_SUFFIX"
 say "  dashboard       https://dashboard.$NP_BASE_DOMAIN$NP_PORT_SUFFIX"
+say "  console (ops)   https://ops.$NP_BASE_DOMAIN$NP_PORT_SUFFIX (local clients only)"
 say "  mail (Mailpit)  https://mail.$NP_BASE_DOMAIN$NP_PORT_SUFFIX"
 say "  npm registry    $registry"
 if [ "${#enabled[@]}" -gt 0 ]; then say "  services        ${enabled[*]}"; fi
