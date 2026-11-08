@@ -149,6 +149,8 @@ secrets:
   webhook_signing_key: { file: ../.secrets/webhook_signing_key.pem }
   sandbox_signing_key: { file: ../.secrets/sandbox_signing_key.pem }
   turnstile_secret: { file: ../.secrets/turnstile_secret }
+  # agentpay near-intents operation-token key; the file name carries its key id (seed.sh keys → keys.env NP_X402_OP_KID)
+  x402_op_key: { file: "../.secrets/x402_op_key_${NP_X402_OP_KID:?run scripts/seed.sh keys}" }
 
 services:
   # ------------------------------------------------------------------------------------------
@@ -272,12 +274,12 @@ services:
   # data volumes are handed to that user once per `up` (idempotent).
   volume-init:
     image: postgres:17.11
-    profiles: [rails]
+    profiles: [rails, billing]
     restart: "no"
     user: "0:0"
     network_mode: none
-    entrypoint: [chown, "10001:10001", /vol/rails-obs-archive]
-    volumes: [rails-obs-archive:/vol/rails-obs-archive]
+    entrypoint: [chown, "10001:10001", /vol/rails-obs-archive, /vol/billing-invoices]
+    volumes: [rails-obs-archive:/vol/rails-obs-archive, billing-invoices:/vol/billing-invoices]
     logging: *logging
 
   nats:
@@ -492,7 +494,13 @@ services:
       NP_SERVICE_CLIENT_SECRET_FILE: /run/secrets/service_client_agentpay
       NP_PII_KEK_FILE: /run/secrets/kek_agentpay
       NP_RELAYER_ACCOUNT: ${NP_RELAYER_ACCOUNT:-}
-    secrets: [db_url_agentpay, service_client_agentpay, kek_agentpay]
+      # x402 near-intents (agentpay §3.1, Stage 3): operation-token keys, kid = the `*` part of the file name
+      NP_X402_OPERATION_KEY_FILES: /run/secrets/x402_op_key_*
+    secrets:
+      - db_url_agentpay
+      - service_client_agentpay
+      - kek_agentpay
+      - { source: x402_op_key, target: "/run/secrets/x402_op_key_${NP_X402_OP_KID:?run scripts/seed.sh keys}" }
     networks: [internal, data, egress]
     depends_on:
       migrate-agentpay: { condition: service_completed_successfully }
@@ -565,9 +573,12 @@ services:
       NP_EGRESS_PROXY: http://egress-proxy:4750
     secrets: [db_url_webhooks, service_client_webhooks, webhook_signing_key, kek_webhooks]
     networks: [internal, data]
+    # NP_VALKEY_URL (x-env): events-stream concurrency across replicas (webhooks §5.1); the dispatcher's per-endpoint
+    # semaphore. Without it each replica counts on its own.
     depends_on:
       migrate-webhooks: { condition: service_completed_successfully }
       nats: { condition: service_healthy }
+      valkey: { condition: service_healthy }
 
   webhooks-ingest:
     <<: *webhooks
@@ -686,7 +697,9 @@ services:
     command: [dist/main.js, worker]
 
   # ------------------------------------------------------------------------------------------
-  # billing (Stage 3+)
+  # billing (Stage 3): products, prices, tax rates, invoices (+ PDFs on the billing-invoices volume), subscriptions.
+  # Hosted invoices are pay.<domain>/i/<in_…>#<secret> (NP_PAY_ORIGIN, x-env); Invoice.invoice_pdf links use
+  # NP_API_ORIGIN. Stage 4 adds the keeper (NP_KEEPER_KEY_FILE, NEAR RPC, egress).
   # ------------------------------------------------------------------------------------------
   migrate-billing:
     <<: *migrate
@@ -701,20 +714,29 @@ services:
     profiles: [billing]
     command: [dist/main.js, api]
     environment:
-      <<: [*env, *chain-env]
+      <<: [*env, *pricing-env]
       NP_SERVICE: billing
       NP_DB_URL_FILE: /run/secrets/db_url_billing
       NP_SERVICE_CLIENT_SECRET_FILE: /run/secrets/service_client_billing
       NP_PII_KEK_FILE: /run/secrets/kek_billing
+      NP_API_ORIGIN: https://api.${NP_BASE_DOMAIN:-nearpay.localhost}${NP_PORT_SUFFIX:-}
+      NP_OBJECT_STORE: fs:/data/invoices
+      # hosted-invoice session creations per minute: per client network, per invoice (billing §6)
+      NP_PUBLIC_SESSIONS_PER_CLIENT: ${NP_PUBLIC_SESSIONS_PER_CLIENT:-10}
+      NP_PUBLIC_SESSIONS_PER_INVOICE: ${NP_PUBLIC_SESSIONS_PER_INVOICE:-30}
+      # Stage 4 (keeper): read by billing from then on
       NP_VAULT_CONTRACT: ${NP_VAULT_CONTRACT:-v1.vault.nearpay.near}
       NP_KEEPER_ACCOUNT: ${NP_KEEPER_ACCOUNT:-}
-      NP_OBJECT_STORE: fs:/data/invoices
     secrets: [db_url_billing, service_client_billing, kek_billing]
     volumes: [billing-invoices:/data/invoices]
-    networks: [internal, data, egress]
+    networks: [internal, data] # no internet in Stage 3 (peers only); the Stage 4 keeper adds egress (NEAR RPC)
     depends_on:
       migrate-billing: { condition: service_completed_successfully }
+      volume-init: { condition: service_completed_successfully }
       nats: { condition: service_healthy }
+      identity-api: { condition: service_healthy, required: false }
+      payments-api: { condition: service_healthy, required: false }
+      rails-api: { condition: service_healthy, required: false }
 
   billing-worker:
     <<: *billing
