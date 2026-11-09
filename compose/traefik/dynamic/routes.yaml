@@ -67,11 +67,12 @@ http:
       priority: 150
       middlewares: [strip-internal-headers, invoices-public-ratelimit, api-prefix, authz, api-headers]
       service: billing
-    # Subscription test clock (billing §13, spec 0.3.1 advanceSubscriptionClock): the one test helper billing owns;
+    # Billing's test helpers: the subscription test clock (billing §13, spec 0.3.1 advanceSubscriptionClock) and the
+    # simulated mandate payer (spec 0.4.0 simulateMandateFunding, simulateMandatePayerAction: /v1/test_helpers/mandates/*);
     # every other /v1/test_helpers/* route is payments'. Priority above the payments router.
     billing-test-helpers:
       entryPoints: [websecure]
-      rule: '(Host(`api.{{ $d }}`) && (Path(`/v1/test_helpers/subscriptions`) || PathPrefix(`/v1/test_helpers/subscriptions/`))) || ((Host(`pay.{{ $d }}`) || Host(`dashboard.{{ $d }}`)) && (Path(`/api/v1/test_helpers/subscriptions`) || PathPrefix(`/api/v1/test_helpers/subscriptions/`)))'
+      rule: '(Host(`api.{{ $d }}`) && (Path(`/v1/test_helpers/subscriptions`) || PathPrefix(`/v1/test_helpers/subscriptions/`) || PathPrefix(`/v1/test_helpers/mandates/`))) || ((Host(`pay.{{ $d }}`) || Host(`dashboard.{{ $d }}`)) && (Path(`/api/v1/test_helpers/subscriptions`) || PathPrefix(`/api/v1/test_helpers/subscriptions/`) || PathPrefix(`/api/v1/test_helpers/mandates/`)))'
       priority: 200
       middlewares: [strip-internal-headers, api-prefix, authz, api-headers]
       service: billing

@@ -71,6 +71,7 @@ export NP_PORT_SUFFIX=""
 registry_port="${NP_REGISTRY_PORT:-$(envval NP_REGISTRY_PORT)}"
 registry_port="${registry_port:-4873}"
 registry="http://127.0.0.1:$registry_port"
+checkout_solana_rpc="${NP_CHECKOUT_SOLANA_RPC_URL:-$(envval NP_CHECKOUT_SOLANA_RPC_URL)}"
 
 # Services join once their repository has a Dockerfile (agreed "auto-detect" behaviour).
 profiles=()
@@ -175,6 +176,9 @@ build_site() {
     set -e
     export COREPACK_ENABLE_DOWNLOAD_PROMPT=0
     cd "$work/$repo"
+    # checkout's Solana wallet path (Stage 4; live mode only, test mode never signs): an owner-provided RPC URL, else
+    # the checkout default (the public mainnet endpoint). Rebuild with --build-sites after changing it.
+    if [ "$repo" = nearpay-checkout ] && [ -n "$checkout_solana_rpc" ]; then export VITE_SOLANA_RPC_URL="$checkout_solana_rpc"; fi
     pnpm install --frozen-lockfile --config.@nearpay:registry="$registry/" --config.@nearpay-internal:registry="$registry/"
     pnpm build
   ) </dev/null >"$log" 2>&1; then
