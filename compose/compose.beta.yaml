@@ -93,25 +93,21 @@ services:
   # ------------------------------------------------------------------------------------------
   # Services: beta-only wiring (everything else comes from compose.yaml with beta.env values)
   # ------------------------------------------------------------------------------------------
-  # Console sign-in (owner decision 2026-11-09: one operator, no hardware key): platform passkeys (Touch ID) are
-  # accepted for operators, and the two-person approvals become a single operator's action after a delay, each one
-  # announced (metric *_ops_single_operator_actions_total → Telegram). Flags from identity/sentinel beta work; values
-  # in compose/env/beta.env. The hardware-key wiring (AAGUID list, attestation roots) stays for a later switch back.
+  # Console sign-in (owner decision 2026-11-09): Google login through Cloudflare Access, the JWT verified by identity
+  # (NP_OPS_AUTH_MODE=cloudflare_access; JWKS from https://$NP_CF_ACCESS_TEAM_DOMAIN/cdn-cgi/access/certs over the
+  # egress network). The ops CLI (`scripts/beta.sh ops identity …`) runs inside identity-api with the same env. The
+  # two-person rule is adaptive (no flag; identity/sentinel/compliance defaults). Cool-off: NP_COOLOFF_SECONDS from
+  # beta.env (0). The hardware-key wiring (AAGUID list, attestation roots) stays for passkey mode.
   identity-api: &identity-beta
     environment:
+      NP_OPS_AUTH_MODE: ${NP_OPS_AUTH_MODE:-cloudflare_access}
+      NP_CF_ACCESS_AUD: ${NP_CF_ACCESS_AUD:?set NP_CF_ACCESS_AUD (docs/beta-launch.md step 7; scripts/beta.sh asks for it)}
+      NP_CF_ACCESS_TEAM_DOMAIN: ${NP_CF_ACCESS_TEAM_DOMAIN:?set NP_CF_ACCESS_TEAM_DOMAIN (docs/beta-launch.md step 7)}
+      NP_OPS_BOOTSTRAP_EMAIL: ${NP_OPS_BOOTSTRAP_EMAIL:?set NP_OPS_BOOTSTRAP_EMAIL in compose/env/beta.env}
       NP_OPS_ATTESTATION_ROOTS_FILE: /etc/nearpay/ops-attestation-roots.pem
-      NP_OPS_ALLOW_PLATFORM_PASSKEYS: ${NP_OPS_ALLOW_PLATFORM_PASSKEYS:-false}
-      NP_OPS_SINGLE_OPERATOR: ${NP_OPS_SINGLE_OPERATOR:-false}
-      NP_OPS_SINGLE_OPERATOR_DELAY_S: ${NP_OPS_SINGLE_OPERATOR_DELAY_S:-300}
     configs:
       - { source: ops_attestation_roots, target: /etc/nearpay/ops-attestation-roots.pem }
   identity-worker: *identity-beta
-
-  sentinel-api: &sentinel-beta
-    environment:
-      NP_OPS_SINGLE_OPERATOR: ${NP_OPS_SINGLE_OPERATOR:-false}
-      NP_OPS_SINGLE_OPERATOR_DELAY_S: ${NP_OPS_SINGLE_OPERATOR_DELAY_S:-300}
-  sentinel-auditor: *sentinel-beta
 
   # Resend SMTP (implicit TLS on 465). NP_SMTP_USER / NP_SMTP_PASSWORD_FILE / NP_REPLY_TO / NP_EMAIL_DAILY_CAP /
   # NP_EMAIL_DAILY_RESERVE arrive with notify's beta/public branch (3b366f3); notify on main reads only NP_SMTP_URL and

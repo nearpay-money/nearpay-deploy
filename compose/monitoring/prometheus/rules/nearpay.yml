@@ -108,8 +108,17 @@ groups:
           description: "The dispatcher is not keeping up (or the egress proxy is failing)."
           runbook: "scripts/beta.sh logs webhooks-dispatcher; scripts/beta.sh logs egress-proxy"
 
-      # billing keeper: no outcome counter on billing main yet (TODO beta/public audit: keeper collect outcome metric).
-      # Until then: mandate.collect jobs that stay due mean the keeper is not collecting.
+      # billing (beta/public): nearpay_billing_keeper_collect_total{outcome,livemode} — failed live collections.
+      - alert: KeeperCollectFailed
+        expr: |
+          sum by (outcome) (increase(nearpay_billing_keeper_collect_total{outcome=~"gas|other|insufficient|collect_failed", livemode="true"}[15m])) > 0
+        labels: { severity: critical }
+        annotations:
+          summary: "Keeper: {{ $value | humanize }} live collection(s) failed ({{ $labels.outcome }})"
+          description: "billing-worker could not collect due mandates on mainnet in the last 15 minutes."
+          runbook: "scripts/beta.sh logs billing-worker; gas: top up NP_KEEPER_ACCOUNT with NEAR"
+
+      # The keeper not running at all: mandate.collect jobs that stay due.
       - alert: KeeperStuck
         expr: max(nearpay_billing_jobs_due{kind="mandate.collect"}) > 0
         for: 30m
@@ -130,16 +139,15 @@ groups:
 
   - name: nearpay-ops
     rules:
-      # identity/sentinel single-operator mode (NP_OPS_SINGLE_OPERATOR=true): every approval a single operator takes
-      # alone is announced. Name per the owner decision: nearpay_ops_single_operator_actions_total{action}; the regex
-      # also matches the kit's per-service prefix (nearpay_<svc>_ops_single_operator_actions_total).
+      # Adaptive two-person rule (identity, sentinel, compliance): with one active operator, a two-person action is
+      # completed by its requester after a delay; each one counts in nearpay_ops_single_operator_actions_total{action}.
       - alert: SingleOperatorAction
-        expr: sum by (action) (increase({__name__=~"nearpay_(.+_)?ops_single_operator_actions_total"}[5m])) > 0
+        expr: sum by (action) (increase(nearpay_ops_single_operator_actions_total[5m])) > 0
         labels: { severity: info }
         annotations:
           summary: "single-operator action: {{ $labels.action }}"
-          description: "An approval ran without a second operator (single-operator mode). If it was not you, act now."
-          runbook: "Console > Audit log; if unexpected: Cloudflare Access > revoke sessions, then rotate your passkey"
+          description: "A two-person action ran with a single operator. If it was not you, act now."
+          runbook: "Console > Audit log; if unexpected: Cloudflare Zero Trust > Access > revoke sessions, secure the Google account"
 
   - name: nearpay-email
     rules:

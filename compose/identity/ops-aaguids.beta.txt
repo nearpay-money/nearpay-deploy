@@ -3,9 +3,9 @@
 # With NP_ENV=server identity also requires a full attestation chaining to .secrets/beta/ops_attestation_roots.pem,
 # refuses synced passkeys and ignores the virtual-authenticator AAGUIDs of the local list.
 #
-# Beta decision (2026-11-09): one operator signing in with Touch ID (NP_OPS_ALLOW_PLATFORM_PASSKEYS=true in
-# compose/env/beta.env). This list applies to hardware keys, kept for a later switch back: if the owner buys a key
-# whose model is not listed, add its AAGUID (vendor's published list) on its own line and run `scripts/beta.sh up`.
+# Beta decision (2026-11-09): the console signs in through Cloudflare Access (NP_OPS_AUTH_MODE=cloudflare_access in
+# compose/env/beta.env), so this list is unused there. It is kept for passkey mode: if the owner buys a key whose
+# model is not listed, add its AAGUID (vendor's published list) on its own line and run `scripts/beta.sh up`.
 #
 # YubiKey 5 series (FIDO2)
 cb69481e-8ff7-4039-93ec-0a2729a154a8

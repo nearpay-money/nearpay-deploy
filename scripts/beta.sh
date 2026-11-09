@@ -7,7 +7,7 @@
 #   scripts/beta.sh logs <service>   follow one container's logs (e.g. payments-api, cloudflared, traefik)
 #   scripts/beta.sh smoke            public URLs, Cloudflare Access on ops, Prometheus targets, egress hosts, Telegram
 #   scripts/beta.sh telegram         (re)discover the Telegram chat for alerts and send a test message
-#   scripts/beta.sh ops <svc> <args> run a service's ops CLI, e.g. `ops identity operator-add you@x ops_admin`
+#   scripts/beta.sh ops <svc> <args> run a service's ops CLI, e.g. `ops compliance kyb-decide <acct_…> approved --reason …`
 #
 # Secrets stay in .secrets/ on this Mac (never in chat, never committed). Paste any error back as it is: no secret is
 # ever printed. Re-running `up` is safe; it only changes what is missing or out of date.
@@ -165,8 +165,8 @@ preflight_secrets() {
   fi
   if [ ! -s "$beta/ops_attestation_roots.pem" ]; then
     # Yubico's published FIDO attestation roots (developers.yubico.com/U2F/Attestation_and_Metadata), for operators
-    # with hardware keys. The beta signs in with Touch ID (NP_OPS_ALLOW_PLATFORM_PASSKEYS); this keeps the hardware-key
-    # policy wired for a later switch back.
+    # with hardware keys. The beta signs in through Cloudflare Access (NP_OPS_AUTH_MODE); this keeps passkey mode's
+    # hardware-key policy wired for a later switch back.
     local tmp u
     tmp="$(mktemp)"
     for u in yubico-ca-1.pem yubico-fido-ca-1.pem yubico-fido-ca-2.pem; do
@@ -204,6 +204,28 @@ preflight_telegram() {
   # Alertmanager cannot read environment variables: render its config with the chat id (the token stays a file)
   sed "s/__TELEGRAM_CHAT_ID__/$chat/" "$compose_dir/monitoring/alertmanager/alertmanager.yml.tmpl" >"$beta/alertmanager.yml"
   chmod 644 "$beta/alertmanager.yml"
+}
+
+preflight_access() { # Cloudflare Access values identity verifies the console's JWT with (docs/beta-launch.md step 7)
+  step "Cloudflare Access for the console (ops.nearpay.money)"
+  local aud team
+  aud="${NP_CF_ACCESS_AUD:-$(envval NP_CF_ACCESS_AUD)}"
+  team="${NP_CF_ACCESS_TEAM_DOMAIN:-$(envval NP_CF_ACCESS_TEAM_DOMAIN)}"
+  if [ -z "$aud" ] || [ -z "$team" ]; then
+    [ -t 0 ] || die "NP_CF_ACCESS_AUD / NP_CF_ACCESS_TEAM_DOMAIN are not set: run 'scripts/beta.sh up' in a terminal (docs/beta-launch.md step 7)"
+    say "  From docs/beta-launch.md step 7 (both are identifiers, not secrets):"
+    [ -n "$aud" ] || read -r -p "  Application Audience (AUD) Tag of the 'NearPay console' Access app: " aud
+    [ -n "$team" ] || read -r -p "  Team domain (like nearpay.cloudflareaccess.com): " team
+    team="${team#https://}"
+    team="${team%%/*}"
+  fi
+  printf '%s' "$aud" | grep -Eq '^[0-9a-f]{64}$' || die "the AUD tag should be 64 hex characters (Access > Applications > NearPay console > Overview)"
+  printf '%s' "$team" | grep -Eq '^[a-z0-9-]+\.cloudflareaccess\.com$' || die "the team domain should look like <team>.cloudflareaccess.com"
+  [ "$(envval NP_CF_ACCESS_AUD)" = "$aud" ] || set_owner_env NP_CF_ACCESS_AUD "$aud"
+  [ "$(envval NP_CF_ACCESS_TEAM_DOMAIN)" = "$team" ] || set_owner_env NP_CF_ACCESS_TEAM_DOMAIN "$team"
+  if curl -fsS --max-time 10 "https://$team/cdn-cgi/access/certs" | grep -q '"keys"'; then ok "Access team $team answers (signing keys)"
+  else die "https://$team/cdn-cgi/access/certs does not answer: check the team domain (Zero Trust > Settings > Custom Pages)"; fi
+  ok "AUD tag saved; console operators sign in with Google through Access (bootstrap: $(envval NP_OPS_BOOTSTRAP_EMAIL))"
 }
 
 preflight_live() {
@@ -308,6 +330,9 @@ smoke() {
     if bcompose exec -T egress-proxy nc -z -w 5 "$host" "$port" >/dev/null 2>&1; then ok "$host:$port"
     else bad "$host:$port unreachable from the stack (firewall/VPN on this Mac?)"; fail=1; fi
   done < <(grep 'beta_smoke: true' "$compose_dir/egress/allowlist.yaml")
+  host="$(envval NP_CF_ACCESS_TEAM_DOMAIN)" # identity fetches the Access signing keys from here
+  if [ -n "$host" ] && bcompose exec -T egress-proxy nc -z -w 5 "$host" 443 >/dev/null 2>&1; then ok "$host:443 (Access keys)"
+  else bad "${host:-NP_CF_ACCESS_TEAM_DOMAIN}:443 unreachable from the stack"; fail=1; fi
 
   step "Telegram alert channel"
   local chat res
@@ -332,6 +357,7 @@ case "$cmd" in
     preflight_repos "$pull"
     preflight_secrets
     preflight_telegram
+    preflight_access
     preflight_live
     preflight_config
     step "Keep this Mac awake"
@@ -370,7 +396,7 @@ case "$cmd" in
     say "test message sent; run 'scripts/beta.sh up' (or restart Alertmanager) to apply the chat"
     ;;
   ops)
-    [ $# -ge 2 ] || die "usage: beta.sh ops <identity|compliance|payments|…> <command…> (e.g. ops identity operator-add you@x ops_admin)"
+    [ $# -ge 2 ] || die "usage: beta.sh ops <identity|compliance|payments|…> <command…> (e.g. ops compliance kyb-decide <acct_…> approved --reason …)"
     svc="$1"
     shift
     bcompose exec "$svc-api" /nodejs/bin/node dist/ops.js "$@"

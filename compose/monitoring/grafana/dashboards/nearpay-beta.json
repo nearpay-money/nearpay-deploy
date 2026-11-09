@@ -1209,13 +1209,13 @@
     },
     {
       "type": "timeseries",
-      "title": "Keeper: mandate.collect jobs due",
+      "title": "Keeper: collect outcomes and jobs due",
       "id": 26,
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
       },
-      "description": "billing has no keeper outcome counter yet (TODO beta/public audit); jobs that stay due mean the keeper is not collecting",
+      "description": "billing: nearpay_billing_keeper_collect_total{outcome,livemode} per hour; mandate.collect jobs that stay due mean the keeper is not running",
       "gridPos": {
         "h": 8,
         "w": 8,
@@ -1253,8 +1253,17 @@
             "uid": "prometheus"
           },
           "refId": "A",
+          "expr": "sum by (outcome, livemode) (increase(nearpay_billing_keeper_collect_total[1h]))",
+          "legendFormat": "{{outcome}} (live={{livemode}})"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "refId": "B",
           "expr": "max(nearpay_billing_jobs_due{kind=\"mandate.collect\"})",
-          "legendFormat": "due"
+          "legendFormat": "jobs due"
         }
       ]
     },
@@ -1375,6 +1384,15 @@
           "refId": "B",
           "expr": "sum by (result) (increase(nearpay_sentinel_audit_findings_total[1h]))",
           "legendFormat": "audit {{result}}"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "refId": "C",
+          "expr": "sum by (action) (increase(nearpay_ops_single_operator_actions_total[1h]))",
+          "legendFormat": "single-operator {{action}}"
         }
       ]
     },

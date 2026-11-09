@@ -34,6 +34,7 @@ jobs:
             grafana_admin_password ops_attestation_roots.pem; do echo placeholder > ".secrets/beta/$f"; done
           sed 's/__TELEGRAM_CHAT_ID__/1/' compose/monitoring/alertmanager/alertmanager.yml.tmpl > .secrets/beta/alertmanager.yml
           scripts/seed.sh live
+          NP_CF_ACCESS_AUD=placeholder NP_CF_ACCESS_TEAM_DOMAIN=placeholder.cloudflareaccess.com \
           docker compose --project-name nearpay-beta --project-directory compose -f compose/compose.yaml \
             -f compose/compose.local.yaml -f .secrets/live/compose.live.yaml -f compose/compose.beta.yaml \
             --env-file compose/env/local.env --env-file compose/env/beta.env --env-file .secrets/public/keys.env \

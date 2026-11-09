@@ -39,7 +39,7 @@ These accounts control the domain, the console and the alerts. Protect each with
 - [ ] **Resend** (after step 9): Settings → Account → enable two-factor authentication.
 - [ ] **GitHub**: Settings → Password and authentication → two-factor (authenticator app).
 - [ ] **Telegram**: Settings → Privacy and Security → Two-Step Verification → set a cloud password (and a recovery email).
-- [ ] **This Mac**: System Settings → Privacy & Security → **FileVault On**; Lock Screen → require password **immediately**, screen saver/display off after **≤ 5 minutes**; a strong login password; Network → **Firewall On**. Touch ID set up (you sign in to the console with it).
+- [ ] **This Mac**: System Settings → Privacy & Security → **FileVault On**; Lock Screen → require password **immediately**, screen saver/display off after **≤ 5 minutes**; a strong login password; Network → **Firewall On**.
 
 ## 2. Cloudflare account
 
@@ -86,19 +86,22 @@ These accounts control the domain, the console and the alerts. Protect each with
 
 ## 7. Cloudflare Access in front of the console (ops.nearpay.money)
 
-The console has its own passkey sign-in. Access adds a second, separate login wall at Cloudflare, so nobody can even reach the console's pages or API without your Google account.
+You sign in to the console with **Google through Cloudflare Access**. Access stops everyone else at Cloudflare's edge, and NearPay checks Access's signed login token again on your Mac (`NP_OPS_AUTH_MODE=cloudflare_access`), so the console's pages and API answer only you.
 
 - [ ] **Google login method.** Zero Trust → **Settings → Authentication → Login methods → Add new → Google**. Cloudflare shows the steps; in short:
   1. [console.cloud.google.com](https://console.cloud.google.com) → create a project `nearpay-access` → **APIs & Services → OAuth consent screen**: External, app name `NearPay Access`, support email `nearpaydotmoney@gmail.com` → save (Testing mode is fine; add `nearpaydotmoney@gmail.com` as a test user).
   2. **Credentials → Create credentials → OAuth client ID** → Web application → Authorized JavaScript origin `https://<team>.cloudflareaccess.com`, Authorized redirect URI `https://<team>.cloudflareaccess.com/cdn-cgi/access/callback` (your team name from step 5).
   3. Paste the **Client ID** and **Client secret** into Cloudflare → Save → **Test** (it should show your Google account).
 - [ ] **One-time PIN** stays enabled as the fallback login method (it is on by default; it emails a code to `nearpaydotmoney@gmail.com`).
-- [ ] Zero Trust → **Access → Applications → Add an application → Self-hosted**:
+- [ ] Zero Trust (Free plan, step 5) → **Access → Applications → Add an application → Self-hosted**:
   - Name `NearPay console`; **Session duration 8 hours**.
   - Public hostname: subdomain `ops`, domain `nearpay.money`, **path empty** (this covers every path, including the console API `/api/ops/*`).
   - Policy `Owner`: Action **Allow**, Include → **Emails** → `nearpaydotmoney@gmail.com`.
   - Login methods: **Google** and **One-time PIN** only; leave "Instant Auth" off (so you can pick).
   - Save. `scripts/beta.sh smoke` fails if Access is not answering first on `ops.nearpay.money`.
+- [ ] **Copy two identifiers** (not secrets). The first `scripts/beta.sh up` asks for them and saves them in `.secrets/beta/beta.env` (`NP_CF_ACCESS_AUD`, `NP_CF_ACCESS_TEAM_DOMAIN`):
+  - the **Application Audience (AUD) Tag**: Access → Applications → NearPay console → **Overview** (64 characters);
+  - your **team domain**: `<team>.cloudflareaccess.com` (Zero Trust → Settings → Custom Pages shows it).
 
 ## 8. Firewall (WAF) and bot settings
 
@@ -157,7 +160,7 @@ pbpaste | tr -d '\n' > .secrets/beta/telegram_bot_token    # step 11 (123456789:
 | `turnstile_secret` | you (step 6) | identity, payments |
 | `resend_api_key` | you (step 9) | notify (SMTP password) |
 | `telegram_bot_token` | you (step 11) | Alertmanager, smoke test |
-| `beta.env` | script (Telegram chat id) | Alertmanager config |
+| `beta.env` | script (Telegram chat id, Access AUD tag and team domain you type in) | Alertmanager config, identity |
 | `grafana_admin_password` | script | Grafana (user `admin`) |
 | `ops_attestation_roots.pem` | script (Yubico's published roots) | identity (hardware keys, for later) |
 | `alertmanager.yml` | script | Alertmanager |
@@ -168,15 +171,9 @@ pbpaste | tr -d '\n' > .secrets/beta/telegram_bot_token    # step 11 (123456789:
 scripts/beta.sh up
 ```
 
-- [ ] It checks the Mac (Docker memory, disk), that every repository is on a clean `main` (and pulls it), the secrets, the Telegram chat, the live settings, then builds and starts everything and runs the smoke test. The first run takes a while (image builds). Paste back any `FAIL` or error.
+- [ ] It checks the Mac (Docker memory, disk), that every repository is on a clean `main` (and pulls it), the secrets, the Telegram chat, the Access identifiers, the live settings, then builds and starts everything and runs the smoke test. The first run takes a while (image builds). Paste back any `FAIL` or error.
 - [ ] At the end it prints the public URLs and "Smoke test passed". Grafana: <http://127.0.0.1:3000> (user `admin`, password in `.secrets/beta/grafana_admin_password`), dashboard **NearPay beta**.
-- [ ] **Enrol yourself as the operator** (console sign-in, see "Console sign-in" below):
-
-  ```sh
-  scripts/beta.sh ops identity operator-add nearpaydotmoney@gmail.com ops_admin
-  ```
-
-  The enrolment email arrives in Gmail. Open its link **on this Mac in Safari or Chrome** → Cloudflare Access (Google) → create the passkey with **Touch ID**. Then sign in at <https://ops.nearpay.money>.
+- [ ] **Sign in to the console**: open <https://ops.nearpay.money> → Cloudflare Access → **Sign in with Google** as `nearpaydotmoney@gmail.com`. You are the first operator (`ops_admin`) automatically (`NP_OPS_BOOTSTRAP_EMAIL`); nothing to enrol.
 - [ ] Sign up as a merchant yourself at <https://dashboard.nearpay.money> to check the flow (Turnstile, email code, passkey).
 
 ## 15. Live setup and the vault (mainnet checklist)
@@ -192,13 +189,14 @@ Run **`claude/mainnet-checklist.md` sections A → C** with these beta differenc
   scripts/beta.sh ops compliance kyb-decide <acct_…> approved --reason "beta: details reviewed by owner"
   ```
 
-  The beta runs strict (`NP_ENV=server`): a new settlement destination has its **24-hour cool-off**, which cannot be skipped. Add the merchant's destination a day before you need live payments.
+  The beta runs strict (`NP_ENV=server`) but with the destination **cool-off set to 0** (`NP_COOLOFF_SECONDS=0`): a new settlement destination is usable at once; its attestation, step-up and the activation email still apply.
 - [ ] **C.6**: the dashboard shows **Live**; the console shows the kill switch **off**; Grafana's "Kill switch" tile says off.
 
 ## Console sign-in (decided 2026-11-09)
 
-- **Now (beta):** one operator (you), signing in with a **Touch ID passkey** (platform passkeys allowed for operators, `NP_OPS_ALLOW_PLATFORM_PASSKEYS=true`). Approvals that normally need a second operator run as your own action after a 5-minute delay (`NP_OPS_SINGLE_OPERATOR=true`), and each one sends a Telegram **NOTICE: single-operator action: …**. If you ever get one you did not cause: Cloudflare Zero Trust → Access → revoke all sessions, then remove and re-create your passkey.
-- **Later (option):** a hardware security key (e.g. YubiKey 5) and a second operator. The hardware-key policy stays wired (`compose/identity/ops-aaguids.beta.txt`, `.secrets/beta/ops_attestation_roots.pem`): set both flags to `false` in `compose/env/beta.env` and run `scripts/beta.sh up`.
+- **Google login through Cloudflare Access** (`NP_OPS_AUTH_MODE=cloudflare_access`): Access lets only `nearpaydotmoney@gmail.com` in (session 8 hours, one-time PIN as fallback), and identity verifies Access's token on every console request. Actions that need a fresh confirmation ask you to log in to Access again. Protect the Google account with an authenticator app and printed backup codes (step 1): it is the key to the console.
+- **Two-person rule, adaptive:** while you are the only active operator, approvals that normally need a second operator are completed by you after a short delay, with a reason, and each sends a Telegram **NOTICE: single-operator action: …**. If you ever get one you did not cause: Zero Trust → Access → revoke sessions, then secure the Google account. Once a second operator exists, the normal two-person approval applies again.
+- Passkey mode with hardware keys stays available for later (`compose/identity/ops-aaguids.beta.txt`, `.secrets/beta/ops_attestation_roots.pem`).
 
 ## When an alert fires (Telegram)
 
@@ -211,10 +209,10 @@ Each message says what is wrong, where, since when, and a first command to try. 
 | KillSwitchEngaged | live payments are stopped on purpose by sentinel: read `scripts/beta.sh logs sentinel-api`, decide in the console |
 | ReconciliationDifference, QuoteIntegrityFailure | money-path checks: stop and look (`logs payments-worker` / `logs rails-api`) before anything else |
 | OutboxBacklog, DeadLetters, WebhookBacklog | a service or NATS is stuck: `logs` of the service named, then `scripts/beta.sh up` |
-| KeeperStuck, VaultEventsRejected | auto-debit collections: `logs billing-worker`; check the keeper account has NEAR for gas |
+| KeeperCollectFailed, KeeperStuck, VaultEventsRejected | auto-debit collections: `logs billing-worker`; check the keeper account has NEAR for gas |
 | EmailCapLow, EmailCapped, EmailFailures | Resend dashboard → Usage / Logs; `logs notify-worker` |
 | DiskLow, DiskCritical | `docker system df`, `docker image prune`, `docker builder prune`; raise Docker Desktop's disk limit |
-| SingleOperatorAction (notice) | confirm it was you |
+| SingleOperatorAction (notice) | confirm it was you (see "Console sign-in") |
 
 UptimeRobot emails you separately when the site is unreachable from outside: check the Mac is awake, Docker Desktop is running, then `scripts/beta.sh up`.
 
