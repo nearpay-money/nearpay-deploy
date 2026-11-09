@@ -86,22 +86,48 @@ These accounts control the domain, the console and the alerts. Protect each with
 
 ## 7. Cloudflare Access in front of the console (ops.nearpay.money)
 
-You sign in to the console with **Google through Cloudflare Access**. Access stops everyone else at Cloudflare's edge, and NearPay checks Access's signed login token again on your Mac (`NP_OPS_AUTH_MODE=cloudflare_access`), so the console's pages and API answer only you.
+**What this is.** Zero Trust is Cloudflare's free login service (free up to 50 users). **Access** is the part that puts a
+login page in front of a website: before anyone reaches `ops.nearpay.money`, Cloudflare asks them to sign in and lets
+only the email addresses you allow through. Each protected website is an **application** in Access. NearPay then checks
+Cloudflare's signed login token again on your Mac (`NP_OPS_AUTH_MODE=cloudflare_access`). For that it needs two
+identifiers (not secrets): the application's **AUD tag** (which app the token is for) and your **team domain** (who
+issued it).
 
-- [ ] **Google login method.** Zero Trust → **Settings → Authentication → Login methods → Add new → Google**. Cloudflare shows the steps; in short:
-  1. [console.cloud.google.com](https://console.cloud.google.com) → create a project `nearpay-access` → **APIs & Services → OAuth consent screen**: External, app name `NearPay Access`, support email `nearpaydotmoney@gmail.com` → save (Testing mode is fine; add `nearpaydotmoney@gmail.com` as a test user).
-  2. **Credentials → Create credentials → OAuth client ID** → Web application → Authorized JavaScript origin `https://<team>.cloudflareaccess.com`, Authorized redirect URI `https://<team>.cloudflareaccess.com/cdn-cgi/access/callback` (your team name from step 5).
-  3. Paste the **Client ID** and **Client secret** into Cloudflare → Save → **Test** (it should show your Google account).
-- [ ] **One-time PIN** stays enabled as the fallback login method (it is on by default; it emails a code to `nearpaydotmoney@gmail.com`).
-- [ ] Zero Trust (Free plan, step 5) → **Access → Applications → Add an application → Self-hosted**:
-  - Name `NearPay console`; **Session duration 8 hours**.
-  - Public hostname: subdomain `ops`, domain `nearpay.money`, **path empty** (this covers every path, including the console API `/api/ops/*`).
-  - Policy `Owner`: Action **Allow**, Include → **Emails** → `nearpaydotmoney@gmail.com`.
-  - Login methods: **Google** and **One-time PIN** only; leave "Instant Auth" off (so you can pick).
-  - Save. `scripts/beta.sh smoke` fails if Access is not answering first on `ops.nearpay.money`.
-- [ ] **Copy two identifiers** (not secrets). The first `scripts/beta.sh up` asks for them and saves them in `.secrets/beta/beta.env` (`NP_CF_ACCESS_AUD`, `NP_CF_ACCESS_TEAM_DOMAIN`):
-  - the **Application Audience (AUD) Tag**: Access → Applications → NearPay console → **Overview** (64 characters);
-  - your **team domain**: `<team>.cloudflareaccess.com` (Zero Trust → Settings → Custom Pages shows it).
+**Login method: pick one.**
+- **Simplest: One-time PIN** (on by default, no setup). Cloudflare emails a 6-digit code to `nearpaydotmoney@gmail.com`.
+  This is as safe as your Google account, because the code lands in that Gmail.
+- **Sign in with Google** (optional, about 10 minutes): Zero Trust → **Integrations → Identity providers** (older
+  dashboards: Settings → Authentication → Login methods) → **Add → Google**, then follow Cloudflare's steps:
+  1. [console.cloud.google.com](https://console.cloud.google.com) → new project `nearpay-access` → **APIs & Services →
+     OAuth consent screen**: External, app name `NearPay Access`, support email `nearpaydotmoney@gmail.com`, add
+     `nearpaydotmoney@gmail.com` as a test user.
+  2. **Credentials → Create credentials → OAuth client ID** → Web application → Authorized JavaScript origin
+     `https://<team>.cloudflareaccess.com`, Authorized redirect URI
+     `https://<team>.cloudflareaccess.com/cdn-cgi/access/callback`.
+  3. Paste the **Client ID** and **Client secret** into Cloudflare → Save → **Test**.
+
+**Create the application** (dashboard labels as of 2026; older dashboards say "Access → Applications → Add an
+application → Self-hosted"):
+
+- [ ] Zero Trust → **Access controls → Applications → Create new application**.
+- [ ] Choose **Self-hosted and private**. ("Self-hosted" = a website you run yourself, here behind your tunnel. The
+  other choices are SaaS, for logging in to third-party apps like Slack, and private hostnames/IPs, which need the
+  Cloudflare One/WARP client on every device. You want a **public hostname**.)
+- [ ] Name `NearPay console`. **Add public hostname** → subdomain `ops`, domain `nearpay.money`, **path empty** (this
+  covers every path, including the console API `/api/ops/*`).
+- [ ] **Access policies → Create new policy**: name `Owner`, Action **Allow**, rule **Include → Emails →
+  `nearpaydotmoney@gmail.com`**. Save it and make sure it is attached to the application. (Access denies everyone
+  who does not match an Allow policy.)
+- [ ] **Login methods**: One-time PIN (and Google if you set it up). Leave "Apply instant authentication" off unless
+  you use only one method.
+- [ ] **Session Duration: 8 hours** → **Create**.
+- [ ] **Copy the AUD tag**: Access controls → Applications → `NearPay console` → **Configure** → **Basic information**
+  (on some dashboards **Additional settings** or **Overview**) → **Application Audience (AUD) Tag**: a 64-character
+  hex string.
+- [ ] **Team domain**: `<team>.cloudflareaccess.com`, from the team name you chose in step 5 (shown under Zero Trust →
+  Settings).
+- [ ] The first `scripts/beta.sh up` asks for both and saves them in `.secrets/beta/beta.env`. Check: open
+  `https://<team>.cloudflareaccess.com/cdn-cgi/access/certs` in a browser; it shows a page of keys.
 
 ## 8. Firewall (WAF) and bot settings
 
@@ -111,7 +137,8 @@ You sign in to the console with **Google through Cloudflare Access**. Access sto
 
 ## 9. Resend (email)
 
-- [ ] Sign up at [resend.com](https://resend.com) with `nearpaydotmoney@gmail.com`; turn on 2FA (step 1).
+- [ ] Sign up at [resend.com](https://resend.com) with `nearpaydotmoney@gmail.com` (this is only your login). Turn on 2FA (step 1).
+- [ ] Emails are sent **from `receipts@nearpay.money`**, not from the Gmail address: Resend (and every sending service) only sends from a domain you own and verify, and nobody can verify `gmail.com`. Replies go to `nearpaydotmoney@gmail.com` (Reply-To), and no mailbox is needed on nearpay.money.
 - [ ] **Domains → Add domain** → `nearpay.money`. Resend shows DNS records. Click **"Auto configure"** (Sign in to Cloudflare) or add them by hand in Cloudflare → DNS, each with **Proxy status: DNS only** (grey cloud):
   - **DKIM**: TXT `resend._domainkey` → the long `p=…` value Resend shows.
   - **SPF** for the sending subdomain: MX `send` → `feedback-smtp.<region>.amazonses.com` (priority 10) and TXT `send` → `v=spf1 include:amazonses.com ~all` (use Resend's exact values).
