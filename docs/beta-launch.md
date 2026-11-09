@@ -126,9 +126,9 @@ You sign in to the console with **Google through Cloudflare Access**. Access sto
 
 ## 11. Telegram bot for alerts
 
-The bot `@NearPay_alertbot` exists already, but its first token was pasted in a chat, so replace it:
+The bot `@NearPay_alertbot` exists already. For the beta you keep its current token (owner decision 2026-11-09):
 
-- [ ] In Telegram open **@BotFather** → `/revoke` → choose `@NearPay_alertbot` → BotFather replies with a **new token** (`123456789:AA…`). Copy it → `.secrets/beta/telegram_bot_token` (step 13). The old token stops working.
+- [ ] Copy the token BotFather gave you (`123456789:AA…`) → `.secrets/beta/telegram_bot_token` (step 13). Before the VPS move, rotate it: @BotFather → `/revoke` → `@NearPay_alertbot`, put the new token in the same file, run `scripts/beta.sh telegram`.
 - [ ] (For a new bot in future: @BotFather → `/newbot` → a name → a username ending in `bot` → copy the token.)
 - [ ] On the first `scripts/beta.sh up`, the script asks you to open the bot and press **Start** (or send any message); it then finds your chat by itself and saves it in `.secrets/beta/beta.env`. Every alert and the smoke test message arrive in that chat.
 
