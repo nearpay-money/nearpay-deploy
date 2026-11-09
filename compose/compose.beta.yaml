@@ -221,7 +221,9 @@ services:
     user: "65534:65534"
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
-    command: [--web.listen-address=0.0.0.0:9100, --collector.filesystem.fs-types-exclude=^(proc|sysfs|cgroup2?|tmpfs|devtmpfs|overlay|mqueue|nsfs|squashfs|shm)$$]
+    command:
+      - --web.listen-address=0.0.0.0:9100
+      - '--collector.filesystem.fs-types-exclude=^(proc|sysfs|cgroup2?|tmpfs|devtmpfs|overlay|mqueue|nsfs|squashfs|shm)$$'
     volumes: [docker-disk-probe:/docker-disk:ro]
     networks: [internal]
     logging:
