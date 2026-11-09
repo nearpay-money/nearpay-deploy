@@ -94,9 +94,13 @@ case "$cmd" in
     # 1. identity seed-demo: owner, account, test destination and API keys (idempotent on the email);
     #    keys in .secrets/demo.json
     # 2. merchant-demo: its secret key and a webhook endpoint http://merchant-demo:3000/webhooks
-    #    (payment_intent.*, checkout.session.*, agent_payment.*, refund.*) with its signing secret, in
-    #    .secrets/merchant-demo/ (test-mode values; readable by the container user)
+    #    (payment_intent.*, checkout.session.*, agent_payment.*, refund.*, invoice.*, customer.subscription.*)
+    #    with its signing secret, in .secrets/merchant-demo/ (test-mode values; readable by the container user)
     # 3. sandbox: the demo agent's simulated Intents balance (USDC), topped up to 100 USDC
+    # 4. billing (Stage 3, when billing-api runs): a product with a one-time and a monthly price, an exclusive tax
+    #    rate and a customer; ids in .secrets/demo-billing.json (created once, recognised by metadata seed=nearpay-demo)
+    # The demo secret key (sk_test_) also works with the CLI (`nearpay listen|trigger --api-key`); `nearpay login`
+    # needs a dashboard user with a passkey (sign up at dashboard.<domain>; the testbed signs up its own).
     running() { docker compose -p nearpay ps --status running --services 2>/dev/null | grep -qx "$1"; }
     running identity-api || die "identity-api is not running (start the stack with scripts/up.sh first)"
     # identity checks the destination asset against rails' token registry; on a fresh stack rails' first refresh can
@@ -123,11 +127,25 @@ case "$cmd" in
         ${3:+-H "content-type: application/json" -H "idempotency-key: seed-$(date +%s)-$RANDOM" -d "$3"}
     }
     hook="http://merchant-demo:3000/webhooks"
-    if [ -s "$secrets/merchant-demo/webhook_secret" ] &&
-      api GET "/v1/webhook_endpoints?limit=100" | grep -q "\"$hook\""; then
-      say "merchant-demo webhook endpoint present"
+    events='["payment_intent.created","payment_intent.processing","payment_intent.succeeded","payment_intent.payment_failed","payment_intent.requires_review","payment_intent.overpaid","payment_intent.canceled","checkout.session.completed","checkout.session.expired","agent_payment.settled","agent_payment.failed","refund.created","refund.requires_action","refund.pending","refund.succeeded","refund.failed","refund.canceled","invoice.created","invoice.finalized","invoice.sent","invoice.paid","invoice.payment_failed","invoice.overdue","invoice.voided","invoice.marked_uncollectible","customer.subscription.created","customer.subscription.updated","customer.subscription.deleted","customer.subscription.renewal_upcoming"]'
+    endpoints="$(api GET "/v1/webhook_endpoints?limit=100")" || die "listing webhook endpoints failed (is webhooks-api running?)"
+    if [ -s "$secrets/merchant-demo/webhook_secret" ] && printf '%s' "$endpoints" | grep -q "\"$hook\""; then
+      # an endpoint from an earlier stage: add the event types it lacks (PATCH replaces the list)
+      # shellcheck disable=SC2016 # JavaScript template literal, not a shell expansion
+      patch="$(printf '%s' "$endpoints" | node -e '
+        let s = ""; process.stdin.on("data", (d) => (s += d)).on("end", () => {
+          const [hook, want] = [process.argv[1], JSON.parse(process.argv[2])];
+          const ep = JSON.parse(s).data.find((e) => e.url === hook);
+          const missing = want.filter((t) => !ep.enabled_events.includes(t) && !ep.enabled_events.includes("*"));
+          if (missing.length) process.stdout.write(`${ep.id} ${JSON.stringify({ enabled_events: [...ep.enabled_events, ...missing] })}`);
+        });' "$hook" "$events")"
+      if [ -n "$patch" ]; then
+        api PATCH "/v1/webhook_endpoints/${patch%% *}" "${patch#* }" >/dev/null || die "updating the merchant-demo webhook endpoint failed"
+        say "merchant-demo webhook endpoint present (added the Stage 3 event types)"
+      else
+        say "merchant-demo webhook endpoint present"
+      fi
     else
-      events='["payment_intent.created","payment_intent.processing","payment_intent.succeeded","payment_intent.payment_failed","payment_intent.requires_review","payment_intent.overpaid","payment_intent.canceled","checkout.session.completed","checkout.session.expired","agent_payment.settled","agent_payment.failed","refund.created","refund.requires_action","refund.pending","refund.succeeded","refund.failed","refund.canceled"]'
       created="$(api POST /v1/webhook_endpoints "{\"url\":\"$hook\",\"enabled_events\":$events,\"description\":\"merchant-demo (seed.sh)\"}")" ||
         die "creating the merchant-demo webhook endpoint failed (is webhooks-api running?)"
       printf '%s' "$created" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>process.stdout.write(JSON.parse(s).secret))' \
@@ -146,6 +164,30 @@ case "$cmd" in
           "$((100000000 - bal))" >/dev/null || die "funding the demo agent failed"
       fi
       say "demo agent $agent: 100 USDC in the sandbox Intents ledger"
+    fi
+
+    # billing catalogue (Stage 3): created once; .secrets/demo-billing.json keeps the ids
+    if running billing-api; then
+      if [ -s "$secrets/demo-billing.json" ] &&
+        api GET "/v1/products/$(node -pe 'require(process.argv[1]).product' "$secrets/demo-billing.json")" >/dev/null 2>&1; then
+        say "demo billing catalogue present (.secrets/demo-billing.json)"
+      else
+        jget() { node -pe 'JSON.parse(require("fs").readFileSync(0)).id'; }
+        meta='"metadata":{"seed":"nearpay-demo"}'
+        product="$(api POST /v1/products "{\"name\":\"NearPay Demo Plan\",\"description\":\"Seeded by nearpay-deploy (test mode)\",$meta}" | jget)" ||
+          die "creating the demo product failed"
+        one_time="$(api POST /v1/prices "{\"product\":\"$product\",\"unit_amount\":2500,\"currency\":\"usd\",\"nickname\":\"One-time setup\",$meta}" | jget)" ||
+          die "creating the demo one-time price failed"
+        monthly="$(api POST /v1/prices "{\"product\":\"$product\",\"unit_amount\":1000,\"currency\":\"usd\",\"recurring\":{\"interval\":\"month\"},\"nickname\":\"Monthly\",$meta}" | jget)" ||
+          die "creating the demo monthly price failed"
+        tax="$(api POST /v1/tax_rates "{\"display_name\":\"VAT\",\"percentage\":\"19\",\"inclusive\":false,\"jurisdiction\":\"DE\",$meta}" | jget)" ||
+          die "creating the demo tax rate failed"
+        customer="$(api POST /v1/customers "{\"email\":\"customer@merchant.test\",\"name\":\"Demo Customer\",$meta}" | jget)" ||
+          die "creating the demo customer failed"
+        (umask 077 && printf '{"product":"%s","price_one_time":"%s","price_monthly":"%s","tax_rate":"%s","customer":"%s"}\n' \
+          "$product" "$one_time" "$monthly" "$tax" "$customer" >"$secrets/demo-billing.json")
+        say "demo billing catalogue created: $product (prices $one_time, $monthly), tax rate $tax, customer $customer"
+      fi
     fi
     ;;
   live)

@@ -33,9 +33,18 @@ http:
       service: payments
     identity:
       entryPoints: [websecure]
-      rule: '(Host(`api.{{ $d }}`) && (Path(`/v1/account`) || PathPrefix(`/v1/account/`) || Path(`/v1/auth`) || PathPrefix(`/v1/auth/`) || Path(`/v1/api_keys`) || PathPrefix(`/v1/api_keys/`) || Path(`/v1/settlement_destinations`) || PathPrefix(`/v1/settlement_destinations/`))) || ((Host(`pay.{{ $d }}`) || Host(`dashboard.{{ $d }}`)) && (Path(`/api/v1/account`) || PathPrefix(`/api/v1/account/`) || Path(`/api/v1/auth`) || PathPrefix(`/api/v1/auth/`) || Path(`/api/v1/api_keys`) || PathPrefix(`/api/v1/api_keys/`) || Path(`/api/v1/settlement_destinations`) || PathPrefix(`/api/v1/settlement_destinations/`)))'
+      rule: '(Host(`api.{{ $d }}`) && (Path(`/v1/account`) || PathPrefix(`/v1/account/`) || Path(`/v1/auth`) || PathPrefix(`/v1/auth/`) || Path(`/v1/api_keys`) || PathPrefix(`/v1/api_keys/`) || Path(`/v1/settlement_destinations`) || PathPrefix(`/v1/settlement_destinations/`) || Path(`/v1/cli`) || PathPrefix(`/v1/cli/`))) || ((Host(`pay.{{ $d }}`) || Host(`dashboard.{{ $d }}`)) && (Path(`/api/v1/account`) || PathPrefix(`/api/v1/account/`) || Path(`/api/v1/auth`) || PathPrefix(`/api/v1/auth/`) || Path(`/api/v1/api_keys`) || PathPrefix(`/api/v1/api_keys/`) || Path(`/api/v1/settlement_destinations`) || PathPrefix(`/api/v1/settlement_destinations/`) || Path(`/api/v1/cli`) || PathPrefix(`/api/v1/cli/`)))'
       priority: 100
       middlewares: [strip-internal-headers, api-prefix, authz, api-headers]
+      service: identity
+    # CLI device login (identity §3.4, step 3.2): starting and polling a login are anonymous (identity rate-limits per
+    # client IP, 10 per 10 min, and answers 429 with Retry-After); the gateway adds a per-IP limit in front. Approving,
+    # denying and reading a login need the dashboard session (identity router).
+    identity-cli-public:
+      entryPoints: [websecure]
+      rule: '(Host(`api.{{ $d }}`) && Method(`POST`) && (Path(`/v1/cli/logins`) || Path(`/v1/cli/logins/poll`))) || ((Host(`pay.{{ $d }}`) || Host(`dashboard.{{ $d }}`)) && Method(`POST`) && (Path(`/api/v1/cli/logins`) || Path(`/api/v1/cli/logins/poll`)))'
+      priority: 150
+      middlewares: [strip-internal-headers, cli-login-ratelimit, api-prefix, authz, api-headers]
       service: identity
     compliance:
       entryPoints: [websecure]
@@ -49,6 +58,32 @@ http:
       priority: 100
       middlewares: [strip-internal-headers, api-prefix, authz, api-headers]
       service: billing
+    # Hosted invoice page (billing §6, checkout /i/:id): GET|POST /v1/invoices/{id}/public/** need no credential (the
+    # invoice secret travels in the URL fragment and the request body, never the path); per-IP limit in front of
+    # billing's own session limiter (NP_PUBLIC_SESSIONS_PER_*). Priority above the billing router.
+    billing-invoices-public:
+      entryPoints: [websecure]
+      rule: '(Host(`api.{{ $d }}`) && (Method(`GET`) || Method(`POST`)) && PathRegexp(`^/v1/invoices/[^/]+/public(/.*)?$`)) || ((Host(`pay.{{ $d }}`) || Host(`dashboard.{{ $d }}`)) && (Method(`GET`) || Method(`POST`)) && PathRegexp(`^/api/v1/invoices/[^/]+/public(/.*)?$`))'
+      priority: 150
+      middlewares: [strip-internal-headers, invoices-public-ratelimit, api-prefix, authz, api-headers]
+      service: billing
+    # Subscription test clock (billing §13, spec 0.3.1 advanceSubscriptionClock): the one test helper billing owns;
+    # every other /v1/test_helpers/* route is payments'. Priority above the payments router.
+    billing-test-helpers:
+      entryPoints: [websecure]
+      rule: '(Host(`api.{{ $d }}`) && (Path(`/v1/test_helpers/subscriptions`) || PathPrefix(`/v1/test_helpers/subscriptions/`))) || ((Host(`pay.{{ $d }}`) || Host(`dashboard.{{ $d }}`)) && (Path(`/api/v1/test_helpers/subscriptions`) || PathPrefix(`/api/v1/test_helpers/subscriptions/`)))'
+      priority: 200
+      middlewares: [strip-internal-headers, api-prefix, authz, api-headers]
+      service: billing
+    # Events stream (webhooks §5.1, GET /v1/events/stream): server-sent events stay open for as long as the client
+    # listens (`nearpay listen`, the dashboard). The websecure entry point has no write timeout; the webhooks-stream
+    # service flushes every write, and X-Accel-Buffering tells any buffering proxy in front (server stage) not to buffer.
+    webhooks-events-stream:
+      entryPoints: [websecure]
+      rule: '(Host(`api.{{ $d }}`) && Method(`GET`) && Path(`/v1/events/stream`)) || ((Host(`pay.{{ $d }}`) || Host(`dashboard.{{ $d }}`)) && Method(`GET`) && Path(`/api/v1/events/stream`))'
+      priority: 150
+      middlewares: [strip-internal-headers, api-prefix, authz, api-headers, sse-headers]
+      service: webhooks-stream
     webhooks:
       entryPoints: [websecure]
       rule: '(Host(`api.{{ $d }}`) && (Path(`/v1/webhook_endpoints`) || PathPrefix(`/v1/webhook_endpoints/`) || Path(`/v1/events`) || PathPrefix(`/v1/events/`) || Path(`/v1/webhook_signing_keys`) || PathPrefix(`/v1/webhook_signing_keys/`))) || ((Host(`pay.{{ $d }}`) || Host(`dashboard.{{ $d }}`)) && (Path(`/api/v1/webhook_endpoints`) || PathPrefix(`/api/v1/webhook_endpoints/`) || Path(`/api/v1/events`) || PathPrefix(`/api/v1/events/`) || Path(`/api/v1/webhook_signing_keys`) || PathPrefix(`/api/v1/webhook_signing_keys/`)))'
@@ -153,6 +188,23 @@ http:
         average: 10
         burst: 40
         period: 1s
+    # Anonymous hosted-invoice reads, PDF and session creation: per-IP limit before billing's limiter.
+    invoices-public-ratelimit:
+      rateLimit:
+        average: 10
+        burst: 40
+        period: 1s
+    # Anonymous CLI login start/poll (the CLI polls every few seconds and honours Retry-After): per-IP limit before
+    # identity's own 10-per-10-min start limit.
+    cli-login-ratelimit:
+      rateLimit:
+        average: 2
+        burst: 10
+        period: 1s
+    sse-headers:
+      headers:
+        customResponseHeaders:
+          X-Accel-Buffering: "no"
     # sentinel LLD §2: anonymous route, per-IP limit 10 rps.
     sentinel-ratelimit:
       rateLimit:
@@ -176,6 +228,11 @@ http:
     webhooks:
       loadBalancer:
         servers: [{ url: http://webhooks-api:8080 }]
+    webhooks-stream:
+      loadBalancer:
+        servers: [{ url: http://webhooks-api:8080 }]
+        responseForwarding:
+          flushInterval: -1ms # flush each event at once (Traefik also does so for text/event-stream responses)
     agentpay:
       loadBalancer:
         servers: [{ url: http://agentpay-api:8080 }]

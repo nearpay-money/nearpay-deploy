@@ -6,12 +6,13 @@
  * added by the owner.
  *
  * Writes: database passwords and URLs, Ed25519 signing keys (JWT current/next, sentinel, payments
- * ticket, webhooks, sandbox), service client secrets (+ identity's hashed list), per-service KEKs,
+ * ticket, webhooks, sandbox), service client secrets (+ identity's hashed list), per-service KEKs, agentpay's
+ * x402 operation-token key (`x402_op_key_<kid>`, near-intents, agentpay §3.1),
  * the Turnstile test secret, the registry password, and public material under .secrets/public/
  * (keys.env for Compose, sentinel_keys.json for static builds).
  */
 import { createHash, createPublicKey, generateKeyPairSync, randomBytes } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -72,6 +73,17 @@ const webhook = put("webhook_signing_key.pem", ed25519Pem());
 const sandbox = put("sandbox_signing_key.pem", ed25519Pem());
 put("turnstile_secret", TURNSTILE_TEST_SECRET);
 
+// agentpay x402 operation-token key (NP_X402_OPERATION_KEY_FILES=/run/secrets/x402_op_key_*): 32 random bytes as hex;
+// the file name carries the key id (`[a-z0-9-]{1,32}`), `local-` + 12 hex of the key's SHA-256. Kept once created
+// (delete the file to rotate; tokens minted with the old key then fail verification).
+const X402_OP_KEY_RE = /^x402_op_key_(local-[0-9a-f]{12})$/;
+let x402OpKid = readdirSync(dir).map((f) => f.match(X402_OP_KEY_RE)?.[1]).find(Boolean);
+if (!x402OpKid) {
+  const key = hex(32);
+  x402OpKid = `local-${createHash("sha256").update(Buffer.from(key, "hex")).digest("hex").slice(0, 12)}`;
+  put(`x402_op_key_${x402OpKid}`, key);
+}
+
 const clients = {};
 for (const svc of SERVICES) {
   const secret = put(`service_client_${svc}`, hex(32)).trim();
@@ -96,6 +108,7 @@ const publicEnv = [
   `NP_PAYMENTS_TICKET_PUBKEY=${publicRaw(ticket)}`,
   `NP_SANDBOX_SIGNING_PUBKEY=${publicRaw(sandbox)}`,
   `NP_WEBHOOK_SIGNING_KID=${kidOf(webhook)}`,
+  `NP_X402_OP_KID=${x402OpKid}`,
   "",
 ].join("\n");
 mkdirSync(join(dir, "public"), { recursive: true });
