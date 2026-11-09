@@ -7,7 +7,8 @@
  *
  * Writes: database passwords and URLs, Ed25519 signing keys (JWT current/next, sentinel, payments
  * ticket, webhooks, sandbox), service client secrets (+ identity's hashed list), per-service KEKs, agentpay's
- * x402 operation-token key (`x402_op_key_<kid>`, near-intents, agentpay §3.1),
+ * x402 operation-token key (`x402_op_key_<kid>`, near-intents, agentpay §3.1), billing's test-mode keeper key for
+ * the sandbox vault stand-in (`keeper_test_key.json`, near-cli JSON, Stage 4),
  * the Turnstile test secret, the registry password, and public material under .secrets/public/
  * (keys.env for Compose, sentinel_keys.json for static builds).
  */
@@ -36,6 +37,33 @@ function put(name, content) {
   chmodSync(path, 0o644);
   created.push(name);
   return content;
+}
+
+const B58 = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+function base58(bytes) {
+  let n = BigInt(`0x${Buffer.from(bytes).toString("hex") || "0"}`);
+  let out = "";
+  while (n > 0n) {
+    out = B58[Number(n % 58n)] + out;
+    n /= 58n;
+  }
+  for (const b of bytes) {
+    if (b !== 0) break;
+    out = `1${out}`;
+  }
+  return out;
+}
+
+/** A NEAR ed25519 key pair as near-cli credentials JSON (secret key = base58 of seed ‖ public key). */
+function nearCredentials(accountId) {
+  const jwk = generateKeyPairSync("ed25519").privateKey.export({ format: "jwk" });
+  const seed = Buffer.from(jwk.d, "base64url");
+  const pub = Buffer.from(jwk.x, "base64url");
+  return `${JSON.stringify({
+    account_id: accountId,
+    public_key: `ed25519:${base58(pub)}`,
+    private_key: `ed25519:${base58(Buffer.concat([seed, pub]))}`,
+  })}\n`;
 }
 
 function ed25519Pem() {
@@ -72,6 +100,9 @@ const ticket = put("payments_ticket_key.pem", ed25519Pem());
 const webhook = put("webhook_signing_key.pem", ed25519Pem());
 const sandbox = put("sandbox_signing_key.pem", ed25519Pem());
 put("turnstile_secret", TURNSTILE_TEST_SECRET);
+// Stage 4: billing's test-mode keeper (NP_TEST_KEEPER_KEY_FILE on billing-worker). The sandbox vault stand-in registers
+// the key on first use; test mode only (the live keeper key is owner-provided: .secrets/live/keeper_key).
+put("keeper_test_key.json", nearCredentials(process.env.NP_TEST_KEEPER_ACCOUNT || "keeper.sandbox.near"));
 
 // agentpay x402 operation-token key (NP_X402_OPERATION_KEY_FILES=/run/secrets/x402_op_key_*): 32 random bytes as hex;
 // the file name carries the key id (`[a-z0-9-]{1,32}`), `local-` + 12 hex of the key's SHA-256. Kept once created

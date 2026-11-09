@@ -78,6 +78,19 @@ x-chain-env: &chain-env
   NP_ONECLICK_BASE_URL: ${NP_ONECLICK_BASE_URL:-https://1click.chaindefuser.com}
   NP_SANDBOX_SIGNING_PUBKEY: ${NP_SANDBOX_SIGNING_PUBKEY:?run scripts/seed.sh keys}
 
+# Stage 4 subscription vault (ADR-0008, OQ-T-03): one account per mode, shared by billing (mandates, keeper), rails
+# (forwards the account's `nearpay_vault` events to evt.rails.vault.event) and the sandbox (plays the test-mode vault).
+x-vault-env: &vault-env
+  NP_VAULT_CONTRACT: ${NP_VAULT_CONTRACT:-v1.vault.nearpay.near}
+  NP_TEST_VAULT_CONTRACT: ${NP_TEST_VAULT_CONTRACT:-vault.sandbox.near}
+
+# Stage 4 Solana RPC / Bitcoin Esplora pools for live mode (rails watchers + verifiers, sentinel audit reads). Empty
+# keeps each service's default (rails: public endpoints; sentinel: none → `unverifiable` + audit_coverage_missing).
+# Test mode never reads them: rails and sentinel read the sandbox's simulated chains (NP_SANDBOX_BASE_URL).
+x-utxo-svm-env: &utxo-svm-env
+  NP_SOLANA_RPC_URLS: ${NP_SOLANA_RPC_URLS:-}
+  NP_BITCOIN_ESPLORA_URLS: ${NP_BITCOIN_ESPLORA_URLS:-}
+
 networks:
   edge: {} # traefik and the static file server; the only network with published ports
   internal: { internal: true } # every service; no internet
@@ -148,6 +161,9 @@ secrets:
   payments_ticket_key: { file: ../.secrets/payments_ticket_key.pem }
   webhook_signing_key: { file: ../.secrets/webhook_signing_key.pem }
   sandbox_signing_key: { file: ../.secrets/sandbox_signing_key.pem }
+  # billing's test-mode keeper key for the sandbox vault stand-in (near-cli JSON; seed.sh keys). The live keeper key
+  # is owner-provided (.secrets/live/keeper_key → scripts/seed.sh live overlay).
+  keeper_test_key: { file: ../.secrets/keeper_test_key.json }
   turnstile_secret: { file: ../.secrets/turnstile_secret }
   # agentpay near-intents operation-token key; the file name carries its key id (seed.sh keys → keys.env NP_X402_OP_KID)
   x402_op_key: { file: "../.secrets/x402_op_key_${NP_X402_OP_KID:?run scripts/seed.sh keys}" }
@@ -435,7 +451,7 @@ services:
     profiles: [rails]
     command: [dist/main.js, api]
     environment:
-      <<: [*env, *chain-env, *pricing-env]
+      <<: [*env, *chain-env, *pricing-env, *vault-env, *utxo-svm-env]
       NP_SERVICE: rails
       NP_DB_URL_FILE: /run/secrets/db_url_rails
       NP_SERVICE_CLIENT_SECRET_FILE: /run/secrets/service_client_rails
@@ -653,6 +669,10 @@ services:
       NP_SERVICE_CLIENT_SECRET_FILE: /run/secrets/service_client_sandbox
       NP_SANDBOX_SIGNING_KEY_FILE: /run/secrets/sandbox_signing_key
       NP_SANDBOX_TIME_SCALE: ${NP_SANDBOX_TIME_SCALE:-1.0}
+      # Stage 4 subscription-vault stand-in (sandbox §3.1): the account billing and rails use as the test-mode vault
+      NP_SANDBOX_VAULT_ACCOUNT: ${NP_TEST_VAULT_CONTRACT:-vault.sandbox.near}
+      NP_SANDBOX_VAULT_FEE_RECEIVER: ${NP_SANDBOX_VAULT_FEE_RECEIVER:-}
+      NP_SANDBOX_VAULT_CAPS: ${NP_SANDBOX_VAULT_CAPS:-}
     secrets: [db_url_sandbox, service_client_sandbox, sandbox_signing_key]
     networks: [internal, data]
     depends_on:
@@ -674,7 +694,10 @@ services:
     profiles: [sentinel]
     command: [dist/main.js, api]
     environment:
-      <<: [*env, *chain-env]
+      # Stage 4: NP_SOLANA_RPC_URLS / NP_BITCOIN_ESPLORA_URLS (shared pools, utxo-svm-env); sentinel's own provider
+      # accounts (URLs carry keys) come from .secrets/live/sentinel_{solana_rpc,bitcoin_esplora}_urls through the live
+      # overlay (NP_SENTINEL_SOLANA_RPC_URLS_FILE / NP_SENTINEL_BITCOIN_ESPLORA_URLS_FILE, precedence).
+      <<: [*env, *chain-env, *utxo-svm-env]
       NP_SERVICE: sentinel
       NP_DB_URL_FILE: /run/secrets/db_url_sentinel
       NP_REGISTRY_DB_URL_FILE: /run/secrets/db_registry_url_sentinel
@@ -697,9 +720,9 @@ services:
     command: [dist/main.js, worker]
 
   # ------------------------------------------------------------------------------------------
-  # billing (Stage 3): products, prices, tax rates, invoices (+ PDFs on the billing-invoices volume), subscriptions.
-  # Hosted invoices are pay.<domain>/i/<in_…>#<secret> (NP_PAY_ORIGIN, x-env); Invoice.invoice_pdf links use
-  # NP_API_ORIGIN. Stage 4 adds the keeper (NP_KEEPER_KEY_FILE, NEAR RPC, egress).
+  # billing (Stage 3–4): products, prices, tax rates, invoices (+ PDFs on the billing-invoices volume), subscriptions,
+  # vault mandates and the keeper (Stage 4). Hosted invoices are pay.<domain>/i/<in_…>#<secret> (NP_PAY_ORIGIN, x-env);
+  # Invoice.invoice_pdf links use NP_API_ORIGIN.
   # ------------------------------------------------------------------------------------------
   migrate-billing:
     <<: *migrate
@@ -713,8 +736,8 @@ services:
     image: nearpay/billing:${NP_IMAGE_TAG:-local}
     profiles: [billing]
     command: [dist/main.js, api]
-    environment:
-      <<: [*env, *pricing-env]
+    environment: &billing-env
+      <<: [*env, *pricing-env, *vault-env]
       NP_SERVICE: billing
       NP_DB_URL_FILE: /run/secrets/db_url_billing
       NP_SERVICE_CLIENT_SECRET_FILE: /run/secrets/service_client_billing
@@ -724,12 +747,21 @@ services:
       # hosted-invoice session creations per minute: per client network, per invoice (billing §6)
       NP_PUBLIC_SESSIONS_PER_CLIENT: ${NP_PUBLIC_SESSIONS_PER_CLIENT:-10}
       NP_PUBLIC_SESSIONS_PER_INVOICE: ${NP_PUBLIC_SESSIONS_PER_INVOICE:-30}
-      # Stage 4 (keeper): read by billing from then on
-      NP_VAULT_CONTRACT: ${NP_VAULT_CONTRACT:-v1.vault.nearpay.near}
+      # Stage 4 auto-debit (billing §8, §14–§15). Live: the vault (vault-env) over NEAR RPC, keeper account here and its
+      # function-call key from the live overlay (.secrets/live/keeper_key → NP_KEEPER_KEY_FILE on the worker; without it
+      # the live keeper does not collect). Test: the sandbox stand-in over POST /sim/near-rpc (NP_SANDBOX_BASE_URL).
+      NP_NEAR_RPC_URLS: ${NP_NEAR_RPC_URLS:-https://rpc.mainnet.near.org,https://free.rpc.fastnear.com}
       NP_KEEPER_ACCOUNT: ${NP_KEEPER_ACCOUNT:-}
+      NP_TEST_NEAR_RPC_URLS: http://sandbox-api:8080/sim/near-rpc
+      NP_TEST_KEEPER_ACCOUNT: ${NP_TEST_KEEPER_ACCOUNT:-keeper.sandbox.near}
+      # USD stablecoins paid at par (first = default), the vault's allowed tokens and its max fee (empty: billing's
+      # defaults — NEAR USDC + USDT, 500 bps; they must match the deployed vault's config)
+      NP_VAULT_USD_TOKENS: ${NP_VAULT_USD_TOKENS:-}
+      NP_VAULT_TOKENS: ${NP_VAULT_TOKENS:-}
+      NP_VAULT_MAX_FEE_BPS: ${NP_VAULT_MAX_FEE_BPS:-}
     secrets: [db_url_billing, service_client_billing, kek_billing]
     volumes: [billing-invoices:/data/invoices]
-    networks: [internal, data] # no internet in Stage 3 (peers only); the Stage 4 keeper adds egress (NEAR RPC)
+    networks: [internal, data, egress] # egress: NEAR RPC (live vault views, keeper transactions)
     depends_on:
       migrate-billing: { condition: service_completed_successfully }
       volume-init: { condition: service_completed_successfully }
@@ -737,7 +769,13 @@ services:
       identity-api: { condition: service_healthy, required: false }
       payments-api: { condition: service_healthy, required: false }
       rails-api: { condition: service_healthy, required: false }
+      sandbox-api: { condition: service_healthy, required: false }
 
+  # The keeper (`mandate.collect` jobs) runs here, so only the worker holds keeper keys.
   billing-worker:
     <<: *billing
     command: [dist/main.js, worker]
+    environment:
+      <<: *billing-env
+      NP_TEST_KEEPER_KEY_FILE: /run/secrets/keeper_test_key
+    secrets: [db_url_billing, service_client_billing, kek_billing, keeper_test_key]
