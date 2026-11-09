@@ -1,0 +1,60 @@
+# Alertmanager for the beta (compose.beta.yaml): every alert goes to the owner's Telegram chat. scripts/beta.sh renders this file into
+# .secrets/beta/alertmanager.yml, replacing __TELEGRAM_CHAT_ID__ with NP_TELEGRAM_CHAT_ID (.secrets/beta/beta.env);
+# the bot token is read from a file (/run/secrets/telegram_bot_token) and never written here.
+route:
+  receiver: owner-telegram
+  group_by: [alertname, service, instance]
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 4h
+  routes:
+    - matchers: [severity="info"] # notices (single-operator actions): once, no "resolved" message
+      receiver: owner-telegram-notice
+      group_by: [alertname, action]
+      group_wait: 10s
+      repeat_interval: 24h
+    - matchers: [severity="warning"]
+      receiver: owner-telegram
+      repeat_interval: 12h
+
+inhibit_rules:
+  # A service that is down also fails its requests and stops publishing: report the outage only.
+  - source_matchers: [alertname="ServiceDown"]
+    target_matchers: [alertname=~"ErrorSpike|OutboxBacklog|DeadLetters"]
+    equal: [service]
+  - source_matchers: [alertname="EmailCapped"]
+    target_matchers: [alertname=~"EmailCapLow|EmailFailures"]
+  - source_matchers: [alertname="DiskCritical"]
+    target_matchers: [alertname="DiskLow"]
+
+receivers:
+  - name: owner-telegram
+    telegram_configs:
+      - bot_token_file: /run/secrets/telegram_bot_token
+        chat_id: __TELEGRAM_CHAT_ID__
+        parse_mode: HTML
+        send_resolved: true
+        # short and human-readable: what, where, since when, first thing to try
+        message: |-
+          {{ range .Alerts -}}
+          <b>{{ if eq .Status "firing" }}ALERT{{ else }}RESOLVED{{ end }}: {{ .Labels.alertname }}</b>{{ if .Labels.service }} ({{ .Labels.service }}){{ end }}
+          {{ .Annotations.summary | html }}
+          {{ .Annotations.description | html }}
+          Since {{ .StartsAt.UTC.Format "2006-01-02 15:04 UTC" }}{{ if eq .Status "resolved" }}, resolved {{ .EndsAt.UTC.Format "15:04 UTC" }}{{ end }}
+          Try: <code>{{ .Annotations.runbook | html }}</code>
+
+          {{ end }}
+  - name: owner-telegram-notice
+    telegram_configs:
+      - bot_token_file: /run/secrets/telegram_bot_token
+        chat_id: __TELEGRAM_CHAT_ID__
+        parse_mode: HTML
+        send_resolved: false
+        message: |-
+          {{ range .Alerts -}}
+          <b>NOTICE: {{ .Annotations.summary | html }}</b>
+          {{ .Annotations.description | html }}
+          At {{ .StartsAt.UTC.Format "2006-01-02 15:04 UTC" }}
+          Try: <code>{{ .Annotations.runbook | html }}</code>
+
+          {{ end }}

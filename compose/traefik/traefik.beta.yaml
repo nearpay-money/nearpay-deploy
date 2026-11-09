@@ -1,0 +1,54 @@
+# Traefik static configuration for the beta (compose.beta.yaml; lld/platform.md §1). Cloudflare terminates TLS at
+# the edge; cloudflared reaches Traefik over plain HTTP on the private `tunnel` network and is its only client (no
+# published ports). The entry point keeps the name `websecure`, so routes.yaml and the generated ops.yaml apply
+# unchanged. Static configuration is not templated: keep NP_TUNNEL_IP (compose/env/beta.env) in step with trustedIPs.
+global:
+  checkNewVersion: false
+  sendAnonymousUsage: false
+
+entryPoints:
+  websecure:
+    address: ":8080"
+    # X-Forwarded-* (Proto=https, For=client) are kept only from cloudflared; from anyone else Traefik replaces them.
+    # Services take the client IP from CF-Connecting-IP (NP_ENV=server), which Cloudflare's edge sets; Traefik's per-IP
+    # rate limits key on it too (routes.yaml, NP_EDGE=cloudflare).
+    forwardedHeaders:
+      trustedIPs: ["10.233.251.2/32"]
+    transport:
+      respondingTimeouts:
+        readTimeout: 60s
+        idleTimeout: 180s
+        writeTimeout: 0s # server-sent events stay open
+  ping:
+    address: "127.0.0.1:8082"
+  metrics:
+    address: ":8899" # Prometheus only (internal network)
+
+ping:
+  entryPoint: ping
+  manualRouting: true # also routed as api.<domain>/healthz (dynamic/routes.yaml)
+
+metrics:
+  prometheus:
+    entryPoint: metrics
+    addEntryPointsLabels: true
+    addRoutersLabels: true
+    addServicesLabels: true
+
+providers:
+  file:
+    directory: /etc/traefik/dynamic
+    watch: true
+
+api:
+  dashboard: false
+
+log:
+  level: WARN
+  format: json
+
+accessLog:
+  format: json
+  fields:
+    headers:
+      defaultMode: drop # never log credentials, cookies or client secrets

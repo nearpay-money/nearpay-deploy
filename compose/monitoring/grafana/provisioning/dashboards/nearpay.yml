@@ -1,0 +1,10 @@
+# Provisioned dashboards (read from /etc/grafana/dashboards; "NearPay beta" is also the home dashboard).
+apiVersion: 1
+providers:
+  - name: nearpay
+    folder: NearPay
+    type: file
+    disableDeletion: true
+    allowUiUpdates: false
+    options:
+      path: /etc/grafana/dashboards

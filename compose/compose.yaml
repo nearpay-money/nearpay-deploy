@@ -215,6 +215,7 @@ services:
       - ${NP_SITE_JS:-./static/placeholder}:/sites/js:ro
       - ${NP_SITE_DASHBOARD:-./static/placeholder}:/sites/dashboard:ro
       - ${NP_SITE_DOCS:-./static/placeholder}:/sites/docs:ro
+      - ${NP_SITE_WEB:-./static/placeholder}:/sites/web:ro # marketing site (apex), nearpay-site dist/web
     networks: [edge]
     healthcheck:
       test: [CMD, wget, -q, -O, /dev/null, http://127.0.0.1:8080/healthz]
@@ -460,10 +461,8 @@ services:
       NP_EVM_RPC_URLS_1: ${NP_EVM_RPC_URLS_1:-}
       NP_EVM_RPC_URLS_8453: ${NP_EVM_RPC_URLS_8453:-}
       NP_EVM_RPC_URLS_42161: ${NP_EVM_RPC_URLS_42161:-}
-      # Internet hosts rails calls (the server stage's egress allow-list): 1click.chaindefuser.com, the NEAR/EVM RPCs,
-      # mainnet.neardata.xyz, explorer.near-intents.org (Explorer, opt-in), api.coingecko.com (secondary prices) and
-      # www.ecb.europa.eu (FX). The local `egress` network is not filtered per host; only webhook deliveries are
-      # (Smokescreen).
+      # Internet hosts rails calls: see compose/egress/allowlist.yaml (the egress allow-list for live + beta; every
+      # service's hosts). The local `egress` network is not filtered per host; only webhook deliveries are (Smokescreen).
       # pricing and FX (rails §8.2, ADR-0020): ECB daily rates + CoinGecko keyless secondary prices in live mode;
       # test mode prices from NP_TEST_FX_RATES (empty: the service's fixed table). JSON values live in local.env.
       NP_STABLE_PEGS: ${NP_STABLE_PEGS:-}

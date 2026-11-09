@@ -1,0 +1,82 @@
+# Prometheus for the beta (compose.beta.yaml). Every NearPay process serves `GET /metrics` on :9464 (kit
+# @nearpay-internal/service; names `nearpay_<service>_<thing>_<unit>`, lld/00-foundations.md §12). Scraped every 30 s
+# (light on a laptop); 15 days / 2 GB retention. Rules: rules/*.yml; alerts go to Alertmanager (→ Telegram).
+global:
+  scrape_interval: 30s
+  scrape_timeout: 10s
+  evaluation_interval: 30s
+  external_labels:
+    stack: nearpay-beta
+
+alerting:
+  alertmanagers:
+    - static_configs: [{ targets: [alertmanager:9093] }]
+
+rule_files: [/etc/prometheus/rules/*.yml]
+
+scrape_configs:
+  # One target per process container (scripts/up.sh enables every service profile in beta). `service` and `process`
+  # label every series; `instance` is the container name.
+  - job_name: nearpay
+    static_configs:
+      - targets: [identity-api:9464]
+        labels: { service: identity, process: api }
+      - targets: [identity-worker:9464]
+        labels: { service: identity, process: worker }
+      - targets: [payments-api:9464]
+        labels: { service: payments, process: api }
+      - targets: [payments-worker:9464]
+        labels: { service: payments, process: worker }
+      - targets: [rails-api:9464]
+        labels: { service: rails, process: api }
+      - targets: [rails-tracker:9464]
+        labels: { service: rails, process: tracker }
+      - targets: [rails-feeds:9464]
+        labels: { service: rails, process: feeds }
+      - targets: [agentpay-api:9464]
+        labels: { service: agentpay, process: api }
+      - targets: [agentpay-batcher:9464]
+        labels: { service: agentpay, process: batcher }
+      - targets: [compliance-api:9464]
+        labels: { service: compliance, process: api }
+      - targets: [compliance-worker:9464]
+        labels: { service: compliance, process: worker }
+      - targets: [webhooks-api:9464]
+        labels: { service: webhooks, process: api }
+      - targets: [webhooks-ingest:9464]
+        labels: { service: webhooks, process: ingest }
+      - targets: [webhooks-dispatcher:9464]
+        labels: { service: webhooks, process: dispatcher }
+      - targets: [notify-api:9464]
+        labels: { service: notify, process: api }
+      - targets: [notify-worker:9464]
+        labels: { service: notify, process: worker }
+      - targets: [sandbox-api:9464]
+        labels: { service: sandbox, process: api }
+      - targets: [sentinel-api:9464]
+        labels: { service: sentinel, process: api }
+      - targets: [sentinel-auditor:9464]
+        labels: { service: sentinel, process: auditor }
+      - targets: [billing-api:9464]
+        labels: { service: billing, process: api }
+      - targets: [billing-worker:9464]
+        labels: { service: billing, process: worker }
+    relabel_configs:
+      - source_labels: [__address__]
+        regex: "([^:]+):\\d+"
+        target_label: instance
+        replacement: "$1"
+
+  # Edge: requests, status codes and latency per Traefik router/service (traefik.beta.yaml metrics entry point).
+  - job_name: traefik
+    static_configs: [{ targets: ["traefik:8899"] }]
+
+  # Docker Desktop's VM: CPU, memory, Docker data disk (/docker-disk).
+  - job_name: node
+    static_configs: [{ targets: ["node-exporter:9100"] }]
+
+  - job_name: prometheus
+    static_configs: [{ targets: ["localhost:9090"] }]
+
+  - job_name: alertmanager
+    static_configs: [{ targets: ["alertmanager:9093"] }]

@@ -1,0 +1,194 @@
+# Beta alerts (→ Alertmanager → Telegram). A small, high-signal set: each one means "look now". Metric names are the
+# ones the services export (kit: nearpay_<svc>_http_requests_total{route,code}, …_outbox_lag_seconds,
+# …_dead_letters_open, …_jobs_due{kind}; service-specific: see the comment on each rule). Annotations feed the Telegram
+# message: summary (what), description (detail), runbook (first thing to try; docs/beta-launch.md "When an alert fires").
+groups:
+  - name: nearpay-availability
+    rules:
+      - alert: ServiceDown
+        expr: up{job="nearpay"} == 0
+        for: 2m
+        labels: { severity: critical }
+        annotations:
+          summary: "{{ $labels.instance }} is down"
+          description: "Prometheus cannot reach {{ $labels.instance }} (service {{ $labels.service }})."
+          runbook: "scripts/beta.sh status; scripts/beta.sh logs {{ $labels.instance }}"
+
+      - alert: PlatformComponentDown
+        expr: up{job=~"traefik|node|alertmanager"} == 0
+        for: 5m
+        labels: { severity: critical }
+        annotations:
+          summary: "{{ $labels.job }} is down"
+          description: "Prometheus cannot reach {{ $labels.instance }}."
+          runbook: "scripts/beta.sh status; scripts/beta.sh logs {{ $labels.job }}"
+
+      - alert: ErrorSpike
+        expr: |
+          (
+            sum by (service) (rate({__name__=~"nearpay_.+_http_requests_total", code=~"5.."}[5m]))
+            / sum by (service) (rate({__name__=~"nearpay_.+_http_requests_total"}[5m]))
+          ) > 0.05
+          and sum by (service) (rate({__name__=~"nearpay_.+_http_requests_total", code=~"5.."}[5m])) > 0.05
+        for: 5m
+        labels: { severity: critical }
+        annotations:
+          summary: "{{ $labels.service }}: {{ $value | humanizePercentage }} of requests fail (5xx)"
+          description: "More than 5% server errors for 5 minutes."
+          runbook: "scripts/beta.sh logs {{ $labels.service }}-api; Grafana > NearPay beta > Errors"
+
+      - alert: EdgeErrorSpike
+        expr: |
+          (
+            sum by (service) (rate(traefik_service_requests_total{code=~"5.."}[5m]))
+            / sum by (service) (rate(traefik_service_requests_total[5m]))
+          ) > 0.10
+          and sum by (service) (rate(traefik_service_requests_total{code=~"5.."}[5m])) > 0.05
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: "Gateway route {{ $labels.service }}: {{ $value | humanizePercentage }} 5xx"
+          description: "Traefik sees more than 10% server errors on this route (incl. static sites and console)."
+          runbook: "scripts/beta.sh logs traefik"
+
+  - name: nearpay-money-path
+    rules:
+      # sentinel: nearpay_sentinel_kill_switch_engaged (1 while live quoting is stopped)
+      - alert: KillSwitchEngaged
+        expr: max(nearpay_sentinel_kill_switch_engaged) == 1
+        labels: { severity: critical }
+        annotations:
+          summary: "Kill switch engaged: live payments are stopped"
+          description: "Sentinel reports the kill switch on; live quoting is refused until ops release it."
+          runbook: "Console (ops.nearpay.money) > Kill switch; scripts/beta.sh logs sentinel-api"
+
+      # payments: nearpay_payments_reconciliation_diffs_total (target: zero)
+      - alert: ReconciliationDifference
+        expr: increase(nearpay_payments_reconciliation_diffs_total[1h]) > 0
+        labels: { severity: critical }
+        annotations:
+          summary: "Payments reconciliation found {{ $value | humanize }} difference(s)"
+          description: "Ledger and chain disagree; do not ignore."
+          runbook: "scripts/beta.sh logs payments-worker"
+
+      # rails: nearpay_rails_quote_integrity_failures_total (service marks it "alert")
+      - alert: QuoteIntegrityFailure
+        expr: increase(nearpay_rails_quote_integrity_failures_total[15m]) > 0
+        labels: { severity: critical }
+        annotations:
+          summary: "Rails refused {{ $value | humanize }} quote(s) on integrity checks"
+          description: "A provider quote failed NearPay's integrity checks."
+          runbook: "scripts/beta.sh logs rails-api"
+
+      - alert: OutboxBacklog
+        expr: max by (service) ({__name__=~"nearpay_.+_outbox_lag_seconds"}) > 300
+        for: 5m
+        labels: { severity: critical }
+        annotations:
+          summary: "{{ $labels.service }}: events not published for {{ $value | humanizeDuration }}"
+          description: "The oldest unpublished outbox row is older than 5 minutes (NATS or the service's relay is stuck)."
+          runbook: "scripts/beta.sh logs {{ $labels.service }}-api; scripts/beta.sh logs nats"
+
+      - alert: DeadLetters
+        expr: max by (service) ({__name__=~"nearpay_.+_dead_letters_open"}) > 0
+        for: 10m
+        labels: { severity: warning }
+        annotations:
+          summary: "{{ $labels.service }}: {{ $value | humanize }} unresolved dead letter(s)"
+          description: "Messages the service gave up on; they need a look."
+          runbook: "scripts/beta.sh logs {{ $labels.service }}-worker"
+
+      # webhooks: nearpay_webhooks_due_backlog (deliveries due and not yet sent)
+      - alert: WebhookBacklog
+        expr: max(nearpay_webhooks_due_backlog) > 100
+        for: 15m
+        labels: { severity: warning }
+        annotations:
+          summary: "{{ $value | humanize }} webhook deliveries waiting"
+          description: "The dispatcher is not keeping up (or the egress proxy is failing)."
+          runbook: "scripts/beta.sh logs webhooks-dispatcher; scripts/beta.sh logs egress-proxy"
+
+      # billing keeper: no outcome counter on billing main yet (TODO beta/public audit: keeper collect outcome metric).
+      # Until then: mandate.collect jobs that stay due mean the keeper is not collecting.
+      - alert: KeeperStuck
+        expr: max(nearpay_billing_jobs_due{kind="mandate.collect"}) > 0
+        for: 30m
+        labels: { severity: critical }
+        annotations:
+          summary: "Keeper: {{ $value | humanize }} mandate collection(s) overdue for 30 min"
+          description: "billing-worker is not collecting due mandates (keeper key, NEAR RPC or gas)."
+          runbook: "scripts/beta.sh logs billing-worker; check NP_KEEPER_ACCOUNT balance"
+
+      # rails: nearpay_rails_vault_event_rejected_total (vault logs dropped instead of forwarded)
+      - alert: VaultEventsRejected
+        expr: increase(nearpay_rails_vault_event_rejected_total[30m]) > 0
+        labels: { severity: warning }
+        annotations:
+          summary: "Rails dropped {{ $value | humanize }} vault event(s)"
+          description: "Vault logs that could not be forwarded to billing (keeper outcomes may be missing)."
+          runbook: "scripts/beta.sh logs rails-tracker"
+
+  - name: nearpay-ops
+    rules:
+      # identity/sentinel single-operator mode (NP_OPS_SINGLE_OPERATOR=true): every approval a single operator takes
+      # alone is announced. Name per the owner decision: nearpay_ops_single_operator_actions_total{action}; the regex
+      # also matches the kit's per-service prefix (nearpay_<svc>_ops_single_operator_actions_total).
+      - alert: SingleOperatorAction
+        expr: sum by (action) (increase({__name__=~"nearpay_(.+_)?ops_single_operator_actions_total"}[5m])) > 0
+        labels: { severity: info }
+        annotations:
+          summary: "single-operator action: {{ $labels.action }}"
+          description: "An approval ran without a second operator (single-operator mode). If it was not you, act now."
+          runbook: "Console > Audit log; if unexpected: Cloudflare Access > revoke sessions, then rotate your passkey"
+
+  - name: nearpay-email
+    rules:
+      # notify (beta/public): nearpay_notify_email_capped_total (mails refused by the daily cap) and
+      # nearpay_notify_email_daily_cap_remaining (NP_EMAIL_DAILY_CAP=90, of which NP_EMAIL_DAILY_RESERVE=15 are kept for
+      # security and approval mails). Resend's free plan stops at 100/day.
+      - alert: EmailCapped
+        expr: sum(increase(nearpay_notify_email_capped_total[15m])) > 0
+        labels: { severity: critical }
+        annotations:
+          summary: "Daily email cap reached: {{ $value | humanize }} mail(s) held back in 15 min"
+          description: "notify refuses mail until the cap resets; sign-in, receipt and approval mails may not arrive."
+          runbook: "Resend dashboard > Usage; Grafana > NearPay beta > Email"
+
+      - alert: EmailCapLow
+        expr: min(nearpay_notify_email_daily_cap_remaining) <= 15
+        labels: { severity: warning }
+        annotations:
+          summary: "Only {{ $value | humanize }} emails left today"
+          description: "notify is down to its reserve for security and approval mails."
+          runbook: "Grafana > NearPay beta > Email (who is sending?)"
+
+      - alert: EmailFailures
+        expr: sum(increase(nearpay_notify_messages_total{status="failed"}[30m])) > 3
+        labels: { severity: warning }
+        annotations:
+          summary: "{{ $value | humanize }} emails failed in 30 min"
+          description: "Resend SMTP refuses or fails sends (API key, domain verification or cap)."
+          runbook: "scripts/beta.sh logs notify-worker"
+
+  - name: nearpay-host
+    rules:
+      # node-exporter: Docker Desktop's data disk (a named volume mounted at /docker-disk)
+      - alert: DiskLow
+        expr: |
+          node_filesystem_avail_bytes{mountpoint="/docker-disk"} / node_filesystem_size_bytes{mountpoint="/docker-disk"} < 0.15
+        for: 10m
+        labels: { severity: warning }
+        annotations:
+          summary: "Docker disk {{ $value | humanizePercentage }} free"
+          description: "Docker Desktop's disk is filling up; Postgres stops when it is full."
+          runbook: "docker system df; docker image prune; raise Docker Desktop > Settings > Resources > Disk limit"
+
+      - alert: DiskCritical
+        expr: |
+          node_filesystem_avail_bytes{mountpoint="/docker-disk"} / node_filesystem_size_bytes{mountpoint="/docker-disk"} < 0.05
+        for: 5m
+        labels: { severity: critical }
+        annotations:
+          summary: "Docker disk almost full ({{ $value | humanizePercentage }} free)"
+          description: "Postgres and NATS will stop writing very soon."
+          runbook: "docker image prune -a; docker builder prune; raise the Docker Desktop disk limit"
