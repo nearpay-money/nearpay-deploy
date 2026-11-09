@@ -26,7 +26,7 @@ What the pieces are (for orientation):
 
 - [ ] Docker Desktop is installed and running, with **Settings → Resources → Memory: 8 GB or more** (12 GB if you have 24 GB+ RAM) and **Disk usage limit ≥ 64 GB**. Turn on **Settings → General → Start Docker Desktop when you sign in**.
 - [ ] Node.js 22, pnpm (`corepack enable`), git and the NearPay repositories in `~/work/near-hackathon/` (as for the local stack). The script builds every image from each repository's `main`.
-- [ ] `compose/env/local.env` has the live accounts from the mainnet checklist **C.1** (`NP_TREASURY_ACCOUNT`, `NP_RELAYER_ACCOUNT`, `NP_NEAR_RPC_URLS`, `NP_VAULT_CONTRACT`, your RPC URLs) and `.secrets/live/relayer_key_1` … `relayer_key_4` exist (prepared on 7 Nov). The keeper key can come later (step 15).
+- [ ] `compose/env/local.env` has the live accounts from the mainnet checklist **C.1** (`NP_TREASURY_ACCOUNT`, `NP_RELAYER_ACCOUNT`, `NP_NEAR_RPC_URLS`, your RPC URLs) and `.secrets/live/relayer_key_1` … `relayer_key_4` exist (prepared on 7 Nov). **`NP_VAULT_CONTRACT` is optional for the first start**: leave it empty until the vault is deployed (live auto-debit stays off; `beta.sh` warns). Never set it to an account under `nearpay.near` such as `v1.vault.nearpay.near`: NearPay does not control `nearpay.near`, so payers' mandate funding would go to someone else's contract (`beta.sh` refuses it). The keeper key can come later too (step 15).
 - [ ] The Mac stays **plugged in with the lid open**. In **System Settings → Battery (or Energy) → Options**: turn on "Prevent automatic sleeping on power adapter when the display is off" and "Wake for network access". The script also runs `caffeinate` while the beta is up.
 
 ## 1. Free security setup (do this first)
@@ -207,8 +207,9 @@ scripts/beta.sh up
 
 Run **`claude/mainnet-checklist.md` sections A → C** with these beta differences:
 
-- [ ] **A** (pre-mainnet gates) and **B** (vault deploy) are unchanged.
-- [ ] **C.1–C.3**: unchanged (accounts in `local.env`, `scripts/seed.sh live`, `node scripts/live-setup.mjs --apply --deposit all`). After adding `.secrets/live/keeper_key` and `NP_KEEPER_ACCOUNT`, run `scripts/beta.sh up` again.
+- [ ] **A** (pre-mainnet gates) and **B** (vault deploy) are unchanged. The vault account is the owner-controlled one decided at A.4 (for example under `nearpay-money.near`), never under `nearpay.near`.
+- [ ] **C.1–C.3**: unchanged (accounts in `local.env`, `scripts/seed.sh live`, `node scripts/live-setup.mjs --apply --deposit all`).
+- [ ] **Turn on live auto-debit** (only after **B** and the keeper): set `NP_VAULT_CONTRACT` in `local.env` to the account you deployed the vault to, add `.secrets/live/keeper_key` and `NP_KEEPER_ACCOUNT`, then run `scripts/beta.sh up` again. Until then the beta runs with live auto-debit off: merchants get `auto_debit_unavailable` for live auto-debit, `send_invoice` works, and Grafana/Prometheus show `nearpay_billing_live_vault_configured 0`.
 - [ ] **C.4**: use `scripts/beta.sh up` (not `scripts/up.sh local`); the health URL is `https://api.nearpay.money/healthz`.
 - [ ] **C.5** (merchant onboarding): the testbed script targets the local stack. In the beta, sign the merchant up in the dashboard, then approve its business details in the console (**KYB cases → Approve**). Interim path while the console's KYB screen is not available to you:
 
