@@ -94,11 +94,13 @@ case "$cmd" in
     # 1. identity seed-demo: owner, account, test destination and API keys (idempotent on the email);
     #    keys in .secrets/demo.json
     # 2. merchant-demo: its secret key and a webhook endpoint http://merchant-demo:3000/webhooks
-    #    (payment_intent.*, checkout.session.*, agent_payment.*, refund.*, invoice.*, customer.subscription.*)
+    #    (payment_intent.*, checkout.session.*, agent_payment.*, refund.*, invoice.*, customer.subscription.*, mandate.*)
     #    with its signing secret, in .secrets/merchant-demo/ (test-mode values; readable by the container user)
     # 3. sandbox: the demo agent's simulated Intents balance (USDC), topped up to 100 USDC
     # 4. billing (Stage 3, when billing-api runs): a product with a one-time and a monthly price, an exclusive tax
-    #    rate and a customer; ids in .secrets/demo-billing.json (created once, recognised by metadata seed=nearpay-demo)
+    #    rate and a customer; ids in .secrets/demo-billing.json (created once, recognised by metadata seed=nearpay-demo).
+    #    Stage 4: both monthly prices are auto-debit eligible — USD (paid at par in USDC) and a USDC-on-NEAR asset price
+    #    (price_monthly_usdc, added to an existing catalogue); the vault tokens must be in rails' token registry.
     # The demo secret key (sk_test_) also works with the CLI (`nearpay listen|trigger --api-key`); `nearpay login`
     # needs a dashboard user with a passkey (sign up at dashboard.<domain>; the testbed signs up its own).
     running() { docker compose -p nearpay ps --status running --services 2>/dev/null | grep -qx "$1"; }
@@ -127,7 +129,7 @@ case "$cmd" in
         ${3:+-H "content-type: application/json" -H "idempotency-key: seed-$(date +%s)-$RANDOM" -d "$3"}
     }
     hook="http://merchant-demo:3000/webhooks"
-    events='["payment_intent.created","payment_intent.processing","payment_intent.succeeded","payment_intent.payment_failed","payment_intent.requires_review","payment_intent.overpaid","payment_intent.canceled","checkout.session.completed","checkout.session.expired","agent_payment.settled","agent_payment.failed","refund.created","refund.requires_action","refund.pending","refund.succeeded","refund.failed","refund.canceled","invoice.created","invoice.finalized","invoice.sent","invoice.paid","invoice.payment_failed","invoice.overdue","invoice.voided","invoice.marked_uncollectible","customer.subscription.created","customer.subscription.updated","customer.subscription.deleted","customer.subscription.renewal_upcoming"]'
+    events='["payment_intent.created","payment_intent.processing","payment_intent.succeeded","payment_intent.payment_failed","payment_intent.requires_review","payment_intent.overpaid","payment_intent.canceled","checkout.session.completed","checkout.session.expired","agent_payment.settled","agent_payment.failed","refund.created","refund.requires_action","refund.pending","refund.succeeded","refund.failed","refund.canceled","invoice.created","invoice.finalized","invoice.sent","invoice.paid","invoice.payment_failed","invoice.overdue","invoice.voided","invoice.marked_uncollectible","customer.subscription.created","customer.subscription.updated","customer.subscription.deleted","customer.subscription.renewal_upcoming","mandate.activated","mandate.collected","mandate.insufficient_funds","mandate.canceled","mandate.exhausted","mandate.updated","mandate.unlinked","mandate.released"]'
     endpoints="$(api GET "/v1/webhook_endpoints?limit=100")" || die "listing webhook endpoints failed (is webhooks-api running?)"
     if [ -s "$secrets/merchant-demo/webhook_secret" ] && printf '%s' "$endpoints" | grep -q "\"$hook\""; then
       # an endpoint from an earlier stage: add the event types it lacks (PATCH replaces the list)
@@ -141,7 +143,7 @@ case "$cmd" in
         });' "$hook" "$events")"
       if [ -n "$patch" ]; then
         api PATCH "/v1/webhook_endpoints/${patch%% *}" "${patch#* }" >/dev/null || die "updating the merchant-demo webhook endpoint failed"
-        say "merchant-demo webhook endpoint present (added the Stage 3 event types)"
+        say "merchant-demo webhook endpoint present (added the missing event types)"
       else
         say "merchant-demo webhook endpoint present"
       fi
@@ -166,11 +168,36 @@ case "$cmd" in
       say "demo agent $agent: 100 USDC in the sandbox Intents ledger"
     fi
 
+    # Stage 4: the vault's allowed tokens (billing NP_VAULT_TOKENS; default NEAR USDC + USDT, the stand-in's tokens)
+    # must be registered in rails' test-mode token registry, or prepareMandate answers auto_debit_unavailable.
+    if running rails-api && running billing-api; then
+      vault_tokens="$(sed -n 's/^NP_VAULT_TOKENS=//p' "$env_file" 2>/dev/null | tail -1)"
+      vault_tokens="${vault_tokens:-17208628f84f5d6ad33f0da3bbbeb27ffcb398eac501a31bd6ad2011e36133a1,usdt.tether-token.near}"
+      # shellcheck disable=SC2016 # JavaScript template literal, not a shell expansion
+      missing_tokens="$(api GET /v1/assets | node -e '
+        let s = ""; process.stdin.on("data", (d) => (s += d)).on("end", () => {
+          const have = new Set(JSON.parse(s).data.map((a) => a.asset_id));
+          const miss = process.argv[1].split(",").map((t) => t.trim()).filter((t) => t && !have.has(`nep141:${t}`));
+          process.stdout.write(miss.join(" "));
+        });' "$vault_tokens")" || die "listing assets failed (is rails-api running?)"
+      [ -z "$missing_tokens" ] || die "vault tokens missing from the rails token registry: $missing_tokens"
+      say "vault tokens registered in rails: $vault_tokens"
+    fi
+
     # billing catalogue (Stage 3): created once; .secrets/demo-billing.json keeps the ids
     if running billing-api; then
       if [ -s "$secrets/demo-billing.json" ] &&
         api GET "/v1/products/$(node -pe 'require(process.argv[1]).product' "$secrets/demo-billing.json")" >/dev/null 2>&1; then
         say "demo billing catalogue present (.secrets/demo-billing.json)"
+        # Stage 4: an asset-priced monthly price (10 USDC on NEAR) for catalogues seeded before it existed
+        if ! grep -q '"price_monthly_usdc"' "$secrets/demo-billing.json"; then
+          product="$(node -pe 'require(process.argv[1]).product' "$secrets/demo-billing.json")"
+          usdc_monthly="$(api POST /v1/prices "{\"product\":\"$product\",\"unit_amount\":\"10000000\",\"currency\":\"asset\",\"asset_id\":\"$usdc\",\"recurring\":{\"interval\":\"month\"},\"nickname\":\"Monthly (USDC)\",\"metadata\":{\"seed\":\"nearpay-demo\"}}" |
+            node -pe 'JSON.parse(require("fs").readFileSync(0)).id')" || die "creating the demo USDC monthly price failed"
+          (umask 077 && node -e 'const f=process.argv[1];const j=require(f);j.price_monthly_usdc=process.argv[2];require("fs").writeFileSync(f,JSON.stringify(j)+"\n")' \
+            "$secrets/demo-billing.json" "$usdc_monthly")
+          say "demo USDC monthly price created: $usdc_monthly (auto-debit eligible)"
+        fi
       else
         jget() { node -pe 'JSON.parse(require("fs").readFileSync(0)).id'; }
         meta='"metadata":{"seed":"nearpay-demo"}'
@@ -180,13 +207,15 @@ case "$cmd" in
           die "creating the demo one-time price failed"
         monthly="$(api POST /v1/prices "{\"product\":\"$product\",\"unit_amount\":1000,\"currency\":\"usd\",\"recurring\":{\"interval\":\"month\"},\"nickname\":\"Monthly\",$meta}" | jget)" ||
           die "creating the demo monthly price failed"
+        usdc_monthly="$(api POST /v1/prices "{\"product\":\"$product\",\"unit_amount\":\"10000000\",\"currency\":\"asset\",\"asset_id\":\"$usdc\",\"recurring\":{\"interval\":\"month\"},\"nickname\":\"Monthly (USDC)\",$meta}" | jget)" ||
+          die "creating the demo USDC monthly price failed"
         tax="$(api POST /v1/tax_rates "{\"display_name\":\"VAT\",\"percentage\":\"19\",\"inclusive\":false,\"jurisdiction\":\"DE\",$meta}" | jget)" ||
           die "creating the demo tax rate failed"
         customer="$(api POST /v1/customers "{\"email\":\"customer@merchant.test\",\"name\":\"Demo Customer\",$meta}" | jget)" ||
           die "creating the demo customer failed"
-        (umask 077 && printf '{"product":"%s","price_one_time":"%s","price_monthly":"%s","tax_rate":"%s","customer":"%s"}\n' \
-          "$product" "$one_time" "$monthly" "$tax" "$customer" >"$secrets/demo-billing.json")
-        say "demo billing catalogue created: $product (prices $one_time, $monthly), tax rate $tax, customer $customer"
+        (umask 077 && printf '{"product":"%s","price_one_time":"%s","price_monthly":"%s","price_monthly_usdc":"%s","tax_rate":"%s","customer":"%s"}\n' \
+          "$product" "$one_time" "$monthly" "$usdc_monthly" "$tax" "$customer" >"$secrets/demo-billing.json")
+        say "demo billing catalogue created: $product (prices $one_time, $monthly, $usdc_monthly), tax rate $tax, customer $customer"
       fi
     fi
     ;;
@@ -194,7 +223,7 @@ case "$cmd" in
     # Owner-provided mainnet credentials (never generated here); see scripts/lib/live-overlay.mjs.
     mkdir -p "$secrets/live" && chmod 700 "$secrets/live"
     node "$deploy/scripts/lib/live-overlay.mjs" "$secrets/live" || die "fix the files in .secrets/live/ and re-run"
-    for v in NP_TREASURY_ACCOUNT NP_RELAYER_ACCOUNT NP_EVM_RPC_URLS_8453 NP_EVM_RPC_URLS_42161; do
+    for v in NP_TREASURY_ACCOUNT NP_RELAYER_ACCOUNT NP_KEEPER_ACCOUNT NP_VAULT_CONTRACT NP_EVM_RPC_URLS_8453 NP_EVM_RPC_URLS_42161 NP_SOLANA_RPC_URLS NP_BITCOIN_ESPLORA_URLS; do
       val="$(sed -n "s/^$v=//p" "$env_file" 2>/dev/null | tail -1)"
       say "  $v: ${val:-<unset in compose/env/local.env>}"
     done
