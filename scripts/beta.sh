@@ -231,10 +231,19 @@ preflight_access() { # Cloudflare Access values identity verifies the console's 
 preflight_live() {
   step "Live (mainnet) settings: compose/env/local.env and .secrets/live/"
   [ -f "$local_env" ] || die "compose/env/local.env is missing: run scripts/up.sh once (it creates it), then fill the accounts (mainnet checklist C.1)"
-  local v missing=0
-  for v in NP_TREASURY_ACCOUNT NP_RELAYER_ACCOUNT NP_NEAR_RPC_URLS NP_VAULT_CONTRACT; do
+  local v vault missing=0
+  for v in NP_TREASURY_ACCOUNT NP_RELAYER_ACCOUNT NP_NEAR_RPC_URLS; do
     if [ -n "$(envval "$v")" ]; then ok "$v=$(envval "$v")"; else bad "$v is empty in compose/env/local.env"; missing=1; fi
   done
+  # The vault is optional for the first start; never an account under nearpay.near (someone else controls it, and
+  # live checkout would send payers' mandate funding to whatever contract they deploy there).
+  vault="$(envval NP_VAULT_CONTRACT)"
+  case "$vault" in
+    "") warn "NP_VAULT_CONTRACT is empty: live auto-debit is off until the vault is deployed (mainnet checklist B); then set it and run 'beta.sh up' again" ;;
+    nearpay.near | *.nearpay.near)
+      die "NP_VAULT_CONTRACT=$vault is under nearpay.near, which NearPay does not control: payers' mandate funding would go to someone else's contract. Set it to the account you deployed the vault to (mainnet checklist A.4/B), or leave it empty (live auto-debit off)" ;;
+    *) ok "NP_VAULT_CONTRACT=$vault" ;;
+  esac
   for v in 1 2 3 4; do
     if [ -s "$live/relayer_key_$v" ]; then ok ".secrets/live/relayer_key_$v"; else bad ".secrets/live/relayer_key_$v is missing"; missing=1; fi
   done

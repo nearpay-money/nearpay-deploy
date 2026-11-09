@@ -80,8 +80,10 @@ x-chain-env: &chain-env
 
 # Stage 4 subscription vault (ADR-0008, OQ-T-03): one account per mode, shared by billing (mandates, keeper), rails
 # (forwards the account's `nearpay_vault` events to evt.rails.vault.event) and the sandbox (plays the test-mode vault).
+# Live: no default — the owner-controlled account the vault was deployed to (mainnet checklist A.4/B). Empty = unset
+# for billing and rails (kit config): live auto-debit is off and rails forwards no live vault events.
 x-vault-env: &vault-env
-  NP_VAULT_CONTRACT: ${NP_VAULT_CONTRACT:-v1.vault.nearpay.near}
+  NP_VAULT_CONTRACT: ${NP_VAULT_CONTRACT:-}
   NP_TEST_VAULT_CONTRACT: ${NP_TEST_VAULT_CONTRACT:-vault.sandbox.near}
 
 # Stage 4 Solana RPC / Bitcoin Esplora pools for live mode (rails watchers + verifiers, sentinel audit reads). Empty

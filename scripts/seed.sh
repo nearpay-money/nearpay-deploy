@@ -224,10 +224,18 @@ case "$cmd" in
     # Owner-provided mainnet credentials (never generated here); see scripts/lib/live-overlay.mjs.
     mkdir -p "$secrets/live" && chmod 700 "$secrets/live"
     node "$deploy/scripts/lib/live-overlay.mjs" "$secrets/live" || die "fix the files in .secrets/live/ and re-run"
+    # never a vault under nearpay.near: NearPay does not control it (payers' funding would go to someone else)
+    vault="$(sed -n "s/^NP_VAULT_CONTRACT=//p" "$env_file" 2>/dev/null | tail -1)"
+    vault="${vault%\"}" && vault="${vault#\"}"
+    case "$vault" in
+      nearpay.near | *.nearpay.near)
+        die "NP_VAULT_CONTRACT=$vault (compose/env/local.env) is under nearpay.near, which NearPay does not control: set the account you deployed the vault to (mainnet checklist A.4/B), or leave it empty (live auto-debit off)" ;;
+    esac
     for v in NP_TREASURY_ACCOUNT NP_RELAYER_ACCOUNT NP_KEEPER_ACCOUNT NP_VAULT_CONTRACT NP_EVM_RPC_URLS_8453 NP_EVM_RPC_URLS_42161 NP_SOLANA_RPC_URLS NP_BITCOIN_ESPLORA_URLS; do
       val="$(sed -n "s/^$v=//p" "$env_file" 2>/dev/null | tail -1)"
       say "  $v: ${val:-<unset in compose/env/local.env>}"
     done
+    [ -n "$vault" ] || say "  (NP_VAULT_CONTRACT empty: live auto-debit is off until the vault is deployed, mainnet checklist B)"
     say "overlay written to .secrets/live/compose.live.yaml (up.sh includes it)"
     ;;
   *)
