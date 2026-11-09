@@ -30,6 +30,11 @@ nearpay-deploy/
 ├── compose/
 │   ├── compose.yaml            all services, networks, volumes, secrets (profile-independent)
 │   ├── compose.local.yaml      local profile: ports on 127.0.0.1, build contexts, registry, Mailpit, merchant demo
+│   ├── compose.beta.yaml       beta overlay (nearpay.money from the owner's Mac): cloudflared, Resend, monitoring
+│   ├── env/beta.env            beta configuration (NP_ENV=server, nearpay.money, Cloudflare edge), after local.env
+│   ├── traefik/traefik.beta.yaml  beta static config: plain HTTP from cloudflared only, forwarded headers, metrics
+│   ├── monitoring/             Prometheus (scrape + alert rules), Alertmanager → Telegram, Grafana "NearPay beta"
+│   ├── egress/allowlist.yaml   every internet host the live/beta stack calls, per container
 │   ├── env/local.env.example   non-secret configuration (copied to local.env on first run)
 │   ├── init/postgres/roles.sh  databases and roles per service (idempotent, runs on every up)
 │   ├── traefik/                static config + dynamic/routes.yaml (routers, ForwardAuth, TLS) + dynamic/ops.yaml (generated)
@@ -40,11 +45,13 @@ nearpay-deploy/
 ├── scripts/
 │   ├── up.sh                   keys → registry seed + publish if missing → build web apps → build images → start, wait healthy
 │   ├── down.sh                 stop (add --volumes to delete local data)
+│   ├── beta.sh                 the closed beta: guided preflight, up, down, status, logs, smoke, telegram, ops
 │   ├── seed.sh                 keys: test-only secrets and TLS certificate into .secrets/ (git-ignored)
 │   ├── live-setup.mjs          one-time mainnet on-chain setup (relayer keys, agent Intents deposit); dry run by default
 │   ├── live-setup/             its code, tests and pinned @near-js/* dependencies (own package.json + pnpm lockfile)
 │   └── lib/                    seed-keys.mjs, registry-seed.mjs
 ├── registry-seed/              exact @nearpay* tarballs the lockfiles resolve to (published by up.sh)
+├── docs/beta-launch.md          owner runbook for the beta (Cloudflare, Resend, Telegram, UptimeRobot, first start)
 ├── apps/ charts/ envs/ platform/ secrets/   post-v1 GitOps layout (empty until then)
 └── .github/workflows/ci.yml
 ```
@@ -54,6 +61,7 @@ nearpay-deploy/
 | Command                       | What it does                                                                                     |
 | ----------------------------- | ------------------------------------------------------------------------------------------------ |
 | `scripts/up.sh local`         | Start everything that is built; `--no-build` skips image builds, `--build-sites` forces web-app builds |
+| `scripts/beta.sh up`          | The closed beta at nearpay.money (owner's Mac; `docs/beta-launch.md`): preflight, build from the sibling mains, start, smoke test. Also `down`, `status`, `logs <svc>`, `smoke`, `telegram`, `ops <svc> <cmd>` |
 | `scripts/down.sh`             | Stop the stack; `--volumes` also deletes Postgres, NATS, Valkey and registry data                 |
 | `scripts/seed.sh data`        | Demo merchant (test mode), merchant-demo key + webhook endpoint, demo agent funded in the sandbox, billing catalogue (product, prices incl. an auto-debit USDC monthly price, tax rate, customer → `.secrets/demo-billing.json`) |
 | `scripts/seed.sh live`        | Check owner-provided mainnet credentials in `.secrets/live/` and generate the overlay `up.sh` uses |
@@ -122,6 +130,20 @@ node scripts/live-setup.mjs --apply --deposit all      # also move the agent's n
 - **Tests** run offline against a fake RPC and fixture keys: `pnpm -C scripts/live-setup test`.
 
 **TLS.** With [mkcert](https://github.com/FiloSottile/mkcert) installed the certificate is trusted by browsers (run `mkcert -install` once); otherwise a self-signed local CA is generated and browsers warn — passkeys (WebAuthn) need the trusted certificate.
+
+**Beta (nearpay.money from the owner's Mac).** `scripts/beta.sh up` runs `scripts/up.sh beta`: Compose project
+`nearpay-beta` (own volumes), `compose/env/beta.env` and `.secrets/beta/beta.env` after `local.env`, and
+`compose/compose.beta.yaml` on top of the local and live overlays. `NP_ENV=server` everywhere. Cloudflare terminates
+TLS; `cloudflared` (token `.secrets/beta/cloudflared_token`, remotely-managed tunnel whose 8 public hostnames point at
+`http://traefik:8080`) is the gateway's only client on the private `tunnel` network; Traefik publishes no ports,
+trusts `X-Forwarded-*` from cloudflared's fixed address only (`traefik.beta.yaml`), keys its per-IP limits on
+`CF-Connecting-IP`, routes the console to tunnel traffic only (Cloudflare Access in front) and answers
+`api.<domain>/healthz` from identity's readiness (`routes.yaml`, `NP_EDGE=cloudflare`). Email: Resend SMTP
+(`.secrets/beta/resend_api_key`), from `NearPay <receipts@nearpay.money>`, Reply-To `nearpaydotmoney@gmail.com`.
+Turnstile: real keys (`.secrets/beta/turnstile_{sitekey,secret}`; the sitekey is baked into the checkout and dashboard
+builds). The marketing site (apex, `www` → apex) and docs come from `nearpay-site`. Monitoring on `127.0.0.1`:
+Prometheus (every process's `:9464`, Traefik, node-exporter), Grafana dashboard "NearPay beta", Alertmanager → Telegram
+(`.secrets/beta/telegram_bot_token`, chat id discovered by `beta.sh`). No Mailpit, merchant demo or local CA.
 
 **Networks.** `edge` (Traefik, static), `internal` (services; no internet), `data` (Postgres, NATS, Valkey and their clients), `egress` (only services that call the internet); webhook deliveries leave only through the egress proxy, which allows exactly one private address: the merchant demo on the `demo` network. The checkout and dashboard call the API same-origin under `/api`, so the API has no CORS surface.
 

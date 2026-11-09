@@ -84,7 +84,8 @@ case "$cmd" in
   keys)
     command -v node >/dev/null 2>&1 || die "Node.js 22 is required (https://nodejs.org)"
     NP_SECRETS_DIR="$secrets" node "$deploy/scripts/lib/seed-keys.mjs"
-    tls "${2:-}"
+    # Beta (NP_EDGE=cloudflare, set by up.sh beta): Cloudflare terminates TLS; no local CA or certificate.
+    if [ "${NP_EDGE:-}" != cloudflare ]; then tls "${2:-}"; fi
     # merchant-demo reads its test-mode key and webhook secret from here (filled by `seed.sh data`)
     mkdir -p "$secrets/merchant-demo" && chmod 755 "$secrets/merchant-demo"
     mkdir -p "$secrets/live" && chmod 700 "$secrets/live"

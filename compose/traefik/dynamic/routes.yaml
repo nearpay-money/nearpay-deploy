@@ -4,14 +4,28 @@
 # call the API same-origin under /api (prefix stripped), so the API needs no CORS. /internal/* is
 # never routed. Router priorities are explicit: narrower prefixes owned by another service win.
 # The console host's API routers (ops.<domain>/api/ops/*) are generated from the spec into ops.yaml.
+#
+# NP_EDGE=cloudflare (beta, compose.beta.yaml): Cloudflare terminates TLS and cloudflared is Traefik's only client, so
+# the local-only hosts (Mailpit, merchant demo) and the local certificate are left out, and the per-IP rate limits key
+# on CF-Connecting-IP (set by Cloudflare's edge; every request would otherwise share cloudflared's address).
 {{- $d := env "NP_BASE_DOMAIN" }}
+{{- $cf := eq (env "NP_EDGE") "cloudflare" }}
+{{- $perIp := "" }}{{ if $cf }}{{ $perIp = "sourceCriterion: { requestHeaderName: CF-Connecting-IP }" }}{{ end }}
 http:
   routers:
+    # Public health URL (UptimeRobot, smoke tests). Locally the gateway's own ping; behind Cloudflare it answers 200
+    # only while identity (sign-in, ForwardAuth for every API route) is ready: Traefik health-checks identity's
+    # /readyz and the request itself goes to /healthz. /readyz is never routed.
     healthz:
       entryPoints: [websecure]
       rule: 'Host(`api.{{ $d }}`) && Path(`/healthz`)'
       priority: 1000
+{{- if $cf }}
+      middlewares: [strip-internal-headers, healthz-path]
+      service: health-identity
+{{- else }}
       service: ping@internal
+{{- end }}
     ping:
       entryPoints: [ping]
       rule: PathPrefix(`/ping`)
@@ -142,6 +156,13 @@ http:
       rule: 'Host(`docs.{{ $d }}`)'
       priority: 10
       service: static
+    # marketing site (nearpay-site dist/web) on the apex; www.<domain> redirects to it (static nginx)
+    site-web:
+      entryPoints: [websecure]
+      rule: 'Host(`{{ $d }}`) || Host(`www.{{ $d }}`)'
+      priority: 10
+      service: static
+{{- if not $cf }}
     mail:
       entryPoints: [websecure]
       rule: 'Host(`mail.{{ $d }}`)'
@@ -150,6 +171,7 @@ http:
       entryPoints: [websecure]
       rule: 'Host(`merchant-demo.{{ $d }}`)'
       service: merchant-demo
+{{- end }}
 
   middlewares:
     # A client can never present an internal token: only ForwardAuth's response sets it.
@@ -173,28 +195,38 @@ http:
         customResponseHeaders:
           Cache-Control: "no-store"
     # The console host answers local clients only (the stack publishes its ports on 127.0.0.1; Docker's port
-    # forwarding presents host clients with a bridge-gateway address). The server stage puts Cloudflare Access in front.
+    # forwarding presents host clients with a bridge-gateway address). Beta (NP_EDGE=cloudflare): Traefik publishes no
+    # ports, so "local" means nothing; the console then answers requests through the tunnel only (cloudflared's fixed
+    # address), and Cloudflare Access on ops.<domain>/* (incl. /api/ops/*) is the network gate in front of the
+    # console's own sign-in (docs/beta-launch.md; `scripts/beta.sh smoke` checks that Access answers first).
     ops-local-only:
       ipAllowList:
+{{- if $cf }}
+        sourceRange: ["{{ env "NP_TUNNEL_IP" }}/32"] # through the tunnel only (cloudflared's fixed address)
+{{- else }}
         sourceRange: [127.0.0.0/8, "::1/128", 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16]
+{{- end }}
     # Anonymous console sign-in (enrolment, passkey ceremonies): per-IP limit before identity's own checks.
     ops-auth-ratelimit:
       rateLimit:
         average: 5
         burst: 20
         period: 1s
+        {{ $perIp }}
     # Anonymous payment-link pages and session creation: per-IP limit before payments' limiter.
     links-public-ratelimit:
       rateLimit:
         average: 10
         burst: 40
         period: 1s
+        {{ $perIp }}
     # Anonymous hosted-invoice reads, PDF and session creation: per-IP limit before billing's limiter.
     invoices-public-ratelimit:
       rateLimit:
         average: 10
         burst: 40
         period: 1s
+        {{ $perIp }}
     # Anonymous CLI login start/poll (the CLI polls every few seconds and honours Retry-After): per-IP limit before
     # identity's own 10-per-10-min start limit.
     cli-login-ratelimit:
@@ -202,6 +234,10 @@ http:
         average: 2
         burst: 10
         period: 1s
+        {{ $perIp }}
+    healthz-path:
+      replacePath:
+        path: /healthz
     sse-headers:
       headers:
         customResponseHeaders:
@@ -212,6 +248,7 @@ http:
         average: 10
         burst: 20
         period: 1s
+        {{ $perIp }}
 
   services:
     payments:
@@ -249,6 +286,15 @@ http:
     static:
       loadBalancer:
         servers: [{ url: http://static:8080 }]
+{{- if $cf }}
+    health-identity:
+      loadBalancer:
+        servers: [{ url: http://identity-api:8080 }]
+        healthCheck:
+          path: /readyz
+          interval: 10s
+          timeout: 3s
+{{- end }}
     console:
       loadBalancer:
         servers: [{ url: http://console:8080 }]
@@ -259,6 +305,7 @@ http:
       loadBalancer:
         servers: [{ url: http://merchant-demo:3000 }]
 
+{{- if not $cf }}
 tls:
   options:
     default:
@@ -271,3 +318,4 @@ tls:
   certificates:
     - certFile: /certs/cert.pem
       keyFile: /certs/key.pem
+{{- end }}

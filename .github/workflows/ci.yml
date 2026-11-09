@@ -27,6 +27,18 @@ jobs:
           cp compose/env/local.env.example compose/env/local.env
           docker compose --project-directory compose -f compose/compose.yaml -f compose/compose.local.yaml \
             --env-file compose/env/local.env --env-file .secrets/public/keys.env --profile '*' config --quiet
+      - name: Compose configuration (beta overlay)
+        run: |
+          mkdir -p .secrets/beta
+          for f in cloudflared_token resend_api_key turnstile_sitekey turnstile_secret telegram_bot_token \
+            grafana_admin_password ops_attestation_roots.pem; do echo placeholder > ".secrets/beta/$f"; done
+          sed 's/__TELEGRAM_CHAT_ID__/1/' compose/monitoring/alertmanager/alertmanager.yml.tmpl > .secrets/beta/alertmanager.yml
+          scripts/seed.sh live
+          NP_CF_ACCESS_AUD=placeholder NP_CF_ACCESS_TEAM_DOMAIN=placeholder.cloudflareaccess.com \
+          docker compose --project-name nearpay-beta --project-directory compose -f compose/compose.yaml \
+            -f compose/compose.local.yaml -f .secrets/live/compose.live.yaml -f compose/compose.beta.yaml \
+            --env-file compose/env/local.env --env-file compose/env/beta.env --env-file .secrets/public/keys.env \
+            --profile '*' config --quiet
       - name: Platform starts healthy
         run: |
           docker compose --project-name nearpay --project-directory compose -f compose/compose.yaml -f compose/compose.local.yaml \

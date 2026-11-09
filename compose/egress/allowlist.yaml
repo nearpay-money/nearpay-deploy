@@ -1,0 +1,72 @@
+# Egress allow-list for live mode and the beta (lld/platform.md §1 "Egress"; mainnet checklist §I): every internet
+# host a container calls, by container. Today the Compose `egress` network is not filtered per host (services call
+# out directly; only webhook deliveries go through Smokescreen, which allows any public address and no private one).
+# This file is the contract for the server stage's filter and for the Mac's own firewall (e.g. Little Snitch);
+# `scripts/beta.sh smoke` checks that the core hosts are reachable from the egress network.
+#
+# Owner-provided RPC URLs (local.env NP_*_RPC_URLS, NP_BITCOIN_ESPLORA_URLS, sentinel_* files) add their own hosts.
+# Format: host:port. `beta_smoke: true` = checked by `scripts/beta.sh smoke`.
+
+edge:
+  cloudflared:
+    - { host: region1.v2.argotunnel.com, port: 7844, note: "Cloudflare Tunnel (QUIC/UDP, falls back to HTTP/2 TCP)" }
+    - { host: region2.v2.argotunnel.com, port: 7844 }
+    - { host: api.cloudflare.com, port: 443, note: "tunnel registration" }
+    - { host: update.argotunnel.com, port: 443, note: "unused: --no-autoupdate" }
+
+services:
+  identity: # NEAR/EVM RPC for destination attestations (ERC-1271), Turnstile siteverify, Access JWKS
+    # Cloudflare Access signing keys (https://<team>/cdn-cgi/access/certs): the host is NP_CF_ACCESS_TEAM_DOMAIN
+    # (.secrets/beta/beta.env); `scripts/beta.sh smoke` checks it from that value. Server-stage filter: add the host.
+    - { host: "${NP_CF_ACCESS_TEAM_DOMAIN}", port: 443 }
+    - { host: challenges.cloudflare.com, port: 443, beta_smoke: true }
+    - { host: rpc.mainnet.near.org, port: 443, beta_smoke: true }
+    - { host: free.rpc.fastnear.com, port: 443 }
+  payments: # Turnstile siteverify, NEAR RPC (verifier salt for live refund legs)
+    - { host: challenges.cloudflare.com, port: 443 }
+    - { host: rpc.mainnet.near.org, port: 443 }
+    - { host: free.rpc.fastnear.com, port: 443 }
+  rails: # 1Click, chain RPCs, neardata, Explorer (opt-in), secondary prices, FX
+    - { host: 1click.chaindefuser.com, port: 443, beta_smoke: true }
+    - { host: explorer.near-intents.org, port: 443, beta_smoke: true }
+    - { host: api.coingecko.com, port: 443, beta_smoke: true }
+    - { host: www.ecb.europa.eu, port: 443, beta_smoke: true }
+    - { host: mainnet.neardata.xyz, port: 443, beta_smoke: true }
+    - { host: rpc.mainnet.near.org, port: 443 }
+    - { host: free.rpc.fastnear.com, port: 443 }
+    - { host: mainnet.base.org, port: 443, note: "default EVM RPCs when NP_EVM_RPC_URLS_* are empty" }
+    - { host: base-rpc.publicnode.com, port: 443 }
+    - { host: arb1.arbitrum.io, port: 443 }
+    - { host: arbitrum-one-rpc.publicnode.com, port: 443 }
+    - { host: eth.llamarpc.com, port: 443 }
+    - { host: ethereum-rpc.publicnode.com, port: 443 }
+    - { host: api.mainnet-beta.solana.com, port: 443, note: "default when NP_SOLANA_RPC_URLS is empty" }
+    - { host: mempool.space, port: 443, note: "default when NP_BITCOIN_ESPLORA_URLS is empty" }
+    - { host: blockstream.info, port: 443 }
+  agentpay: # NEAR RPC (relayer batches to intents.near), 1Click
+    - { host: rpc.mainnet.near.org, port: 443 }
+    - { host: free.rpc.fastnear.com, port: 443 }
+    - { host: 1click.chaindefuser.com, port: 443 }
+  compliance: # OFAC SDN list, daily
+    - { host: sanctionslistservice.ofac.treas.gov, port: 443, beta_smoke: true }
+  notify: # Resend SMTP (implicit TLS)
+    - { host: smtp.resend.com, port: 465, beta_smoke: true }
+  sentinel: # independent re-verification: NEAR/EVM RPCs, 1Click deposit lookups
+    - { host: rpc.mainnet.near.org, port: 443 }
+    - { host: free.rpc.fastnear.com, port: 443 }
+    - { host: 1click.chaindefuser.com, port: 443 }
+    - { host: mainnet.base.org, port: 443 }
+    - { host: base-rpc.publicnode.com, port: 443 }
+    - { host: arb1.arbitrum.io, port: 443 }
+    - { host: arbitrum-one-rpc.publicnode.com, port: 443 }
+    - { host: eth.llamarpc.com, port: 443 }
+    - { host: ethereum-rpc.publicnode.com, port: 443 }
+  billing: # NEAR RPC: live vault views, keeper `collect` transactions
+    - { host: rpc.mainnet.near.org, port: 443 }
+    - { host: free.rpc.fastnear.com, port: 443 }
+  webhooks-dispatcher: # via Smokescreen only: any public merchant URL on 80/443, never a private address
+    - { host: "*", port: 443 }
+
+monitoring:
+  alertmanager:
+    - { host: api.telegram.org, port: 443, beta_smoke: true }

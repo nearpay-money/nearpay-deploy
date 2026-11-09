@@ -1,7 +1,11 @@
 #!/usr/bin/env bash
 # Starts the NearPay stack with Docker Compose (lld/platform.md §1).
 #
-#   scripts/up.sh [local] [--no-build] [--build-sites]
+#   scripts/up.sh [local|beta] [--no-build] [--build-sites]
+#     beta            the closed beta at nearpay.money (normally run through scripts/beta.sh): Compose project
+#                     nearpay-beta, compose/env/beta.env + .secrets/beta/beta.env after local.env, compose.beta.yaml
+#                     on top (Cloudflare Tunnel, Resend, monitoring; no Mailpit, merchant demo or local CA), the
+#                     real Turnstile sitekey in the web builds and the marketing site + docs (nearpay-site)
 #     --no-build      reuses existing images
 #     --build-sites   rebuilds the checkout, dashboard and js loader even when their output is current
 #
@@ -21,9 +25,10 @@ work="$(dirname "$deploy")"
 compose_dir="$deploy/compose"
 secrets="$deploy/.secrets"
 env_file="$compose_dir/env/local.env"
+mode=local
 
 SERVICES=(identity payments rails agentpay compliance webhooks notify sandbox sentinel billing)
-SITES=(pay:nearpay-checkout/dist js:nearpay-js/dist dashboard:nearpay-dashboard/dist docs:nearpay-site/dist/docs)
+SITES=(pay:nearpay-checkout/dist js:nearpay-js/dist dashboard:nearpay-dashboard/dist docs:nearpay-site/dist/docs web:nearpay-site/dist/web)
 # Web apps that ship their own nginx image (profile = image name): nearpay-console serves ops.<domain>.
 SITE_IMAGES=(console)
 
@@ -34,13 +39,14 @@ build=1
 build_sites=0
 for arg in "$@"; do
   case "$arg" in
-    local) ;; # the only profile until Stage 5
+    local) mode=local ;;
+    beta) mode=beta ;;
     server) die "the server profile arrives in Stage 5 (lld/platform.md §5)" ;;
     --observability) die "the observability profile arrives in Stage 5 (lld/platform.md §5)" ;;
     --no-build) build=0 ;;
     --build-sites) build_sites=1 ;;
-    -h | --help) sed -n '2,16p' "$0"; exit 0 ;;
-    *) die "unknown argument '$arg' (usage: scripts/up.sh [local] [--no-build] [--build-sites])" ;;
+    -h | --help) sed -n '2,21p' "$0"; exit 0 ;;
+    *) die "unknown argument '$arg' (usage: scripts/up.sh [local|beta] [--no-build] [--build-sites])" ;;
   esac
 done
 
@@ -59,9 +65,28 @@ command -v curl >/dev/null 2>&1 || die "curl is required"
 
 # ---- configuration ---------------------------------------------------------------------------
 [ -f "$env_file" ] || { cp "$compose_dir/env/local.env.example" "$env_file"; say "created compose/env/local.env from the example"; }
+# Env files in Compose order (later files win); the beta adds its own after local.env.
+env_files=("$env_file")
+project=nearpay
+overlays=()
+if [ "$mode" = beta ]; then
+  project=nearpay-beta
+  env_files+=("$compose_dir/env/beta.env")
+  [ -f "$secrets/beta/beta.env" ] && env_files+=("$secrets/beta/beta.env")
+  overlays=(-f "$compose_dir/compose.beta.yaml")
+  export NP_EDGE=cloudflare # seed.sh keys: no local TLS certificate (Cloudflare terminates TLS)
+fi
 "$deploy/scripts/seed.sh" keys
 
-envval() { sed -n "s/^$1=//p" "$env_file" | tail -1; }
+envval() { # last value of $1 across the env files, unquoted
+  local f v="" x
+  for f in "${env_files[@]}"; do
+    x="$(sed -n "s/^$1=//p" "$f" | tail -1)"
+    [ -n "$x" ] && v="$x"
+  done
+  v="${v#\"}"
+  printf '%s' "${v%\"}"
+}
 export NP_BASE_DOMAIN="${NP_BASE_DOMAIN:-$(envval NP_BASE_DOMAIN)}"
 NP_BASE_DOMAIN="${NP_BASE_DOMAIN:-nearpay.localhost}"
 https_port="${NP_HTTPS_PORT:-$(envval NP_HTTPS_PORT)}"
@@ -72,6 +97,12 @@ registry_port="${NP_REGISTRY_PORT:-$(envval NP_REGISTRY_PORT)}"
 registry_port="${registry_port:-4873}"
 registry="http://127.0.0.1:$registry_port"
 checkout_solana_rpc="${NP_CHECKOUT_SOLANA_RPC_URL:-$(envval NP_CHECKOUT_SOLANA_RPC_URL)}"
+# Turnstile sitekey baked into the checkout and dashboard builds: the beta's real key, else local.env's test key.
+turnstile_sitekey="$(envval NP_TURNSTILE_SITEKEY)"
+if [ "$mode" = beta ]; then
+  [ -s "$secrets/beta/turnstile_sitekey" ] || die "missing .secrets/beta/turnstile_sitekey (docs/beta-launch.md)"
+  turnstile_sitekey="$(tr -d '[:space:]' <"$secrets/beta/turnstile_sitekey")"
+fi
 
 # Services join once their repository has a Dockerfile (agreed "auto-detect" behaviour).
 profiles=()
@@ -83,16 +114,20 @@ done
 for app in "${SITE_IMAGES[@]}"; do
   if [ -f "$work/nearpay-$app/Dockerfile" ]; then profiles+=(--profile "$app"); enabled+=("$app"); else skipped+=("$app"); fi
 done
-if [ -f "$work/nearpay-testbed/merchant-demo/Dockerfile" ]; then profiles+=(--profile merchant-demo); enabled+=(merchant-demo); else skipped+=(merchant-demo); fi
+if [ "$mode" = beta ]; then
+  : # no merchant demo on the public stack
+elif [ -f "$work/nearpay-testbed/merchant-demo/Dockerfile" ]; then profiles+=(--profile merchant-demo); enabled+=(merchant-demo); else skipped+=(merchant-demo); fi
 
 # owner mainnet credentials overlay (scripts/seed.sh live), when present
 live=()
 [ -f "$deploy/.secrets/live/compose.live.yaml" ] && live=(-f "$deploy/.secrets/live/compose.live.yaml")
+env_args=()
+for f in "${env_files[@]}"; do env_args+=(--env-file "$f"); done
 compose() {
-  docker compose --project-name nearpay --project-directory "$compose_dir" \
+  docker compose --project-name "$project" --project-directory "$compose_dir" \
     -f "$compose_dir/compose.yaml" -f "$compose_dir/compose.local.yaml" \
-    ${live[@]+"${live[@]}"} \
-    --env-file "$env_file" --env-file "$secrets/public/keys.env" "$@"
+    ${live[@]+"${live[@]}"} ${overlays[@]+"${overlays[@]}"} \
+    "${env_args[@]}" --env-file "$secrets/public/keys.env" "$@"
 }
 
 # ---- registry: seed, then build from source what the seed lacks ---------------------------------------------
@@ -152,6 +187,8 @@ for repo in nearpay-node nearpay-agentkit; do [ -d "$work/$repo" ] && publish_re
 # The checkout build pins .secrets/public/sentinel_keys.json (its build/config.ts), written by
 # `seed.sh keys` above. Entries are repo:output file that marks a finished build.
 WEB_APPS=(nearpay-js:dist/v1/nearpay.js nearpay-checkout:dist/index.html nearpay-dashboard:dist/index.html)
+# beta: also the marketing site (apex) and the docs, one Astro build (links default to the production hostnames)
+if [ "$mode" = beta ]; then WEB_APPS+=(nearpay-site:dist/web/index.html); fi
 mtime() { node -p 'Math.floor(require("fs").statSync(process.argv[1]).mtimeMs / 1000)' "$1" 2>/dev/null || echo 0; }
 site_stale() { # repo, output file → succeeds when the output must be (re)built
   local repo="$1" out="$work/$1/$2" built head key
@@ -164,6 +201,11 @@ site_stale() { # repo, output file → succeeds when the output must be (re)buil
       grep -rqF -- "$key" "$work/$repo/dist/assets" || return 0
     done
   fi
+  case "$repo" in # the build must carry the Turnstile sitekey of this mode (test key locally, real key in beta)
+    nearpay-checkout | nearpay-dashboard)
+      [ -z "$turnstile_sitekey" ] || grep -rqF -- "$turnstile_sitekey" "$work/$repo/dist" || return 0
+      ;;
+  esac
   return 1
 }
 build_site() {
@@ -179,6 +221,8 @@ build_site() {
     # checkout's Solana wallet path (Stage 4; live mode only, test mode never signs): an owner-provided RPC URL, else
     # the checkout default (the public mainnet endpoint). Rebuild with --build-sites after changing it.
     if [ "$repo" = nearpay-checkout ] && [ -n "$checkout_solana_rpc" ]; then export VITE_SOLANA_RPC_URL="$checkout_solana_rpc"; fi
+    if [ -n "$turnstile_sitekey" ]; then export VITE_TURNSTILE_SITEKEY="$turnstile_sitekey"; fi
+    if [ "$mode" = beta ]; then export VITE_NEAR_NETWORK=mainnet; fi
     pnpm install --frozen-lockfile --config.@nearpay:registry="$registry/" --config.@nearpay-internal:registry="$registry/"
     pnpm build
   ) </dev/null >"$log" 2>&1; then
@@ -245,6 +289,20 @@ if ! compose ${profiles[@]+"${profiles[@]}"} "${up_args[@]}"; then
   die "some containers did not become healthy (see: docker compose -p nearpay logs <service>)"
 fi
 
+if [ "$mode" = beta ]; then
+  say ""
+  say "NearPay beta is up (project $project; TLS at Cloudflare's edge)."
+  say "  site            https://$NP_BASE_DOMAIN"
+  say "  API health      https://api.$NP_BASE_DOMAIN/healthz"
+  say "  checkout        https://pay.$NP_BASE_DOMAIN"
+  say "  dashboard       https://dashboard.$NP_BASE_DOMAIN"
+  say "  console (ops)   https://ops.$NP_BASE_DOMAIN (Cloudflare Access)"
+  say "  docs            https://docs.$NP_BASE_DOMAIN"
+  say "  Grafana         http://127.0.0.1:$(envval NP_GRAFANA_PORT) (this Mac only)"
+  say "  Prometheus      http://127.0.0.1:$(envval NP_PROMETHEUS_PORT) (this Mac only)"
+  if [ "${#skipped[@]}" -gt 0 ]; then say "  NOT BUILT       ${skipped[*]}"; fi
+  exit 0
+fi
 tls_mode="$(cat "$secrets/tls/mode" 2>/dev/null || echo unknown)"
 say ""
 say "NearPay is up (TLS: $tls_mode)."
