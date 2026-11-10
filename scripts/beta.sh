@@ -7,7 +7,7 @@
 #   scripts/beta.sh logs <service>   follow one container's logs (e.g. payments-api, cloudflared, traefik)
 #   scripts/beta.sh smoke            public URLs, Cloudflare Access on ops, Prometheus targets, egress hosts, Telegram
 #   scripts/beta.sh telegram         (re)discover the Telegram chat for alerts and send a test message
-#   scripts/beta.sh ops <svc> <args> run a service's ops CLI, e.g. `ops compliance kyb-decide <acct_…> approved --reason …`
+#   scripts/beta.sh ops <svc> <args> run a service's ops CLI, e.g. `ops compliance kyb-show <acct_…>`
 #
 # Secrets stay in .secrets/ on this Mac (never in chat, never committed). Paste any error back as it is: no secret is
 # ever printed. Re-running `up` is safe; it only changes what is missing or out of date.
