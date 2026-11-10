@@ -314,18 +314,25 @@ smoke() {
   done
 
   step "Monitoring (this Mac)"
-  local pport down
+  local pport down tries=0
   pport="$(envval NP_PROMETHEUS_PORT)"
+  # Containers recreated by `up` stay "down" until Prometheus's next scrape (30 s interval): retry for up to ~2 min.
+  while :; do
   # shellcheck disable=SC2016 # JavaScript template literal
   down="$(curl -sS --max-time 10 "http://127.0.0.1:${pport:-9090}/api/v1/targets?state=active" 2>/dev/null | node -e '
     let s=""; process.stdin.on("data",(d)=>(s+=d)).on("end",()=>{
       try { const t = JSON.parse(s).data.activeTargets;
         const d = t.filter((x) => x.health !== "up").map((x) => x.labels.instance || x.scrapeUrl);
         process.stdout.write(d.length ? d.join(" ") : `ALLUP ${t.length}`); } catch { process.stdout.write("ERROR"); } });' || echo ERROR)"
+  case "$down" in ALLUP*) break ;; esac
+  tries=$((tries + 1)); [ "$tries" -ge 8 ] && break
+  [ "$tries" -eq 1 ] && printf '  …    waiting for Prometheus to scrape restarted services (%s)\n' "$down"
+  sleep 15
+  done
   case "$down" in
     ALLUP*) ok "Prometheus: all ${down#ALLUP } targets up" ;;
     ERROR) bad "Prometheus does not answer on 127.0.0.1:${pport:-9090}"; fail=1 ;;
-    *) bad "Prometheus targets down: $down (they may still be starting; re-run 'beta.sh smoke' in a minute)"; fail=1 ;;
+    *) bad "Prometheus targets down: $down (still down after 2 min: docker compose -p nearpay-beta ps / logs <service>)"; fail=1 ;;
   esac
   if curl -fsS --max-time 5 "http://127.0.0.1:$(envval NP_ALERTMANAGER_PORT)/-/ready" >/dev/null 2>&1; then ok "Alertmanager ready"
   else bad "Alertmanager not ready (beta.sh logs alertmanager)"; fail=1; fi
