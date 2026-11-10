@@ -1,8 +1,8 @@
 # NearPay closed beta: launch runbook (owner)
 
 The beta is the full v1 product in **live mode on mainnet**, served at **nearpay.money** from your Mac (Docker Desktop)
-through a **Cloudflare Tunnel**: no router ports are opened. Anyone can sign up; only merchants whose business details
-you approve in the console go live. Email goes out through **Resend**, alerts come to **Telegram**, and an external
+through a **Cloudflare Tunnel**: no router ports are opened. Anyone can sign up and go live at once by saving their
+business details (open onboarding, ADR-0024); payments confirm on one block of their own chain (ADR-0022). Email goes out through **Resend**, alerts come to **Telegram**, and an external
 **UptimeRobot** check tells you when the site is unreachable (for example, when the Mac is asleep).
 
 Work through the steps in order and tick each box. Everything is free. Each step says where the value it produces goes.
@@ -200,7 +200,7 @@ scripts/beta.sh up
 
 - [ ] It checks the Mac (Docker memory, disk), that every repository is on a clean `main` (and pulls it), the secrets, the Telegram chat, the Access identifiers, the live settings, then builds and starts everything and runs the smoke test. The first run takes a while (image builds). Paste back any `FAIL` or error.
 - [ ] At the end it prints the public URLs and "Smoke test passed". Grafana: <http://127.0.0.1:3000> (user `admin`, password in `.secrets/beta/grafana_admin_password`), dashboard **NearPay beta**.
-- [ ] **Sign in to the console**: open <https://ops.nearpay.money> → Cloudflare Access → **Sign in with Google** as `nearpaydotmoney@gmail.com`. You are the first operator (`ops_admin`) automatically (`NP_OPS_BOOTSTRAP_EMAIL`); nothing to enrol.
+- [ ] **Sign in to the console**: open <https://ops.nearpay.money> → Cloudflare Access → enter `nearpaydotmoney@gmail.com` and the one-time code emailed to it (or **Sign in with Google** if you set it up in step 7). Team domain: `nearpay-money.cloudflareaccess.com`. You are the first operator (`ops_admin`) automatically (`NP_OPS_BOOTSTRAP_EMAIL`); nothing to enrol.
 - [ ] Sign up as a merchant yourself at <https://dashboard.nearpay.money> to check the flow (Turnstile, email code, passkey).
 
 ## 15. Live setup and the vault (mainnet checklist)
@@ -224,7 +224,7 @@ Run **`claude/mainnet-checklist.md` sections A → C** with these beta differenc
 
 ## Console sign-in (decided 2026-11-09)
 
-- **Google login through Cloudflare Access** (`NP_OPS_AUTH_MODE=cloudflare_access`): Access lets only `nearpaydotmoney@gmail.com` in (session 8 hours, one-time PIN as fallback), and identity verifies Access's token on every console request. Actions that need a fresh confirmation ask you to log in to Access again. Protect the Google account with an authenticator app and printed backup codes (step 1): it is the key to the console.
+- **Cloudflare Access** (`NP_OPS_AUTH_MODE=cloudflare_access`, team `nearpay-money`): Access lets only `nearpaydotmoney@gmail.com` in with an emailed one-time code (Google login optional, step 7; session 8 hours), and identity verifies Access's token on every console request. Actions that need a fresh confirmation ask you to log in to Access again. Protect the Google account with an authenticator app and printed backup codes (step 1): it is the key to the console.
 - **Two-person rule, adaptive:** while you are the only active operator, approvals that normally need a second operator are completed by you after a short delay, with a reason, and each sends a Telegram **NOTICE: single-operator action: …**. If you ever get one you did not cause: Zero Trust → Access → revoke sessions, then secure the Google account. Once a second operator exists, the normal two-person approval applies again.
 - Passkey mode with hardware keys stays available for later (`compose/identity/ops-aaguids.beta.txt`, `.secrets/beta/ops_attestation_roots.pem`).
 
