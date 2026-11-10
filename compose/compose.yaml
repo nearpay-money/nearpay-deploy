@@ -559,6 +559,9 @@ services:
       # OFAC SDN list: downloaded on the worker's first start and daily at 03:00 UTC (SP-15); set false
       # offline and load a file with `ops.js sanctions-import - < SDN_ADVANCED.XML`.
       NP_SANCTIONS_REFRESH: ${NP_SANCTIONS_REFRESH:-true}
+      # open onboarding (ADR-0024): auto = complete business details go live at once (geo policy still
+      # blocks automatically); manual = ops review in the console's Businesses list
+      NP_KYB_MODE: ${NP_KYB_MODE:-auto}
     secrets: [db_url_compliance, service_client_compliance, kek_compliance]
     networks: [internal, data, egress]
     depends_on:

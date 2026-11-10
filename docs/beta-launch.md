@@ -211,7 +211,9 @@ Run **`claude/mainnet-checklist.md` sections A → C** with these beta differenc
 - [ ] **C.1–C.3**: unchanged (accounts in `local.env`, `scripts/seed.sh live`, `node scripts/live-setup.mjs --apply --deposit all`).
 - [ ] **Turn on live auto-debit** (only after **B** and the keeper): set `NP_VAULT_CONTRACT` in `local.env` to the account you deployed the vault to, add `.secrets/live/keeper_key` and `NP_KEEPER_ACCOUNT`, then run `scripts/beta.sh up` again. Until then the beta runs with live auto-debit off: merchants get `auto_debit_unavailable` for live auto-debit, `send_invoice` works, and Grafana/Prometheus show `nearpay_billing_live_vault_configured 0`.
 - [ ] **C.4**: use `scripts/beta.sh up` (not `scripts/up.sh local`); the health URL is `https://api.nearpay.money/healthz`.
-- [ ] **C.5** (merchant onboarding): the testbed script targets the local stack. In the beta, sign the merchant up in the dashboard, then approve its business details in the console (**KYB cases → Approve**). Interim path while the console's KYB screen is not available to you:
+- [ ] **C.5** (merchant onboarding): the testbed script targets the local stack. In the beta, sign the merchant up in the dashboard and save its business details (**Settings → Business details**; the registration number is optional). There is **no approval step**: with `NP_KYB_MODE=auto` (the beta default, open onboarding — ADR-0024) the business goes live at once and the dashboard shows "You're live — you can accept real payments". A business registered in a blocked country is declined automatically. The console's **Businesses** list shows every business with its screening result; use it (or **Merchants → suspend**) only for abuse.
+
+  To turn a manual review back on, set `NP_KYB_MODE=manual` in `compose/env/beta.env` and run `scripts/beta.sh up`; then decide each business in the console (**Businesses → Submitted**) or with:
 
   ```sh
   scripts/beta.sh ops compliance kyb-decide <acct_…> approved --reason "beta: details reviewed by owner"
