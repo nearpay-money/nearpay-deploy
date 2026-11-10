@@ -463,11 +463,14 @@ services:
       NP_EVM_RPC_URLS_1: ${NP_EVM_RPC_URLS_1:-}
       NP_EVM_RPC_URLS_8453: ${NP_EVM_RPC_URLS_8453:-}
       NP_EVM_RPC_URLS_42161: ${NP_EVM_RPC_URLS_42161:-}
-      # EVM evidence rule per chain (ADR-0022): `finalized` or a block count; empty = rails' profile defaults
-      # (Base 10, Arbitrum 40 L2 block confirmations, Ethereum finalized)
+      # Payment confirmation (ADR-0022 as amended 2026-11-10 17:10): ONE block of each chain's own consensus — EVM 1
+      # block on `latest` (every chain), Solana `confirmed`, Bitcoin 1 confirmation, NEAR `final` — each re-checked at
+      # finality after success (alert FinalityRecheckFailed). Overrides: EVM `finalized` or a block count per chain;
+      # Solana `finalized`. Empty = rails' defaults.
       NP_EVM_CONFIRMATIONS_1: ${NP_EVM_CONFIRMATIONS_1:-}
       NP_EVM_CONFIRMATIONS_8453: ${NP_EVM_CONFIRMATIONS_8453:-}
       NP_EVM_CONFIRMATIONS_42161: ${NP_EVM_CONFIRMATIONS_42161:-}
+      NP_SOLANA_COMMITMENT: ${NP_SOLANA_COMMITMENT:-confirmed}
       # Internet hosts rails calls: see compose/egress/allowlist.yaml (the egress allow-list for live + beta; every
       # service's hosts). The local `egress` network is not filtered per host; only webhook deliveries are (Smokescreen).
       # pricing and FX (rails §8.2, ADR-0020): ECB daily rates + CoinGecko keyless secondary prices in live mode;

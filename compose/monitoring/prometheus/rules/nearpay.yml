@@ -128,16 +128,18 @@ groups:
           description: "billing-worker is not collecting due mandates (keeper key, NEAR RPC or gas)."
           runbook: "scripts/beta.sh logs billing-worker; check NP_KEEPER_ACCOUNT balance"
 
-      # rails: nearpay_rails_finality_recheck_total{chain,outcome} — post-success `finalized` re-check of payments
-      # confirmed on L2 block confirmations (Base/Arbitrum, ADR-0022). failed = at Ethereum finality the transfer's
-      # block hash changed, the receipt vanished or its status is not 1; timeout = not finalized within 2 h. The
+      # rails: nearpay_rails_finality_recheck_total{chain,outcome} — post-success re-check of payments confirmed on ONE
+      # block of their chain (ADR-0022 as amended 2026-11-10 17:10), every Tier-A family: EVM (any eip155 chain) at the
+      # `finalized` tag (2 h window), Solana at `finalized` commitment (30 min), Bitcoin at 6 confirmations in the same
+      # block (6 h). failed = at finality the transfer's block hash/slot changed, it vanished (orphaned / dropped fork)
+      # or it failed; timeout = not final within the window. No chain filter: every chain and both outcomes alert. The
       # payment stays succeeded in rails: ops must review it (console evidence trail, finality_recheck_status).
       - alert: FinalityRecheckFailed
         expr: sum by (chain, outcome) (increase(nearpay_rails_finality_recheck_total{outcome=~"failed|timeout"}[30m])) > 0
         labels: { severity: critical }
         annotations:
-          summary: "Rails: {{ $value | humanize }} confirmed EVM payment(s) {{ $labels.outcome }} the finalized re-check on {{ $labels.chain }}"
-          description: "A payment settled on L2 confirmations was contradicted (or not finalized) at L1 finality; it is still marked succeeded. Check the execution before delivering more."
+          summary: "Rails: {{ $value | humanize }} one-block payment(s) {{ $labels.outcome }} the finality re-check on {{ $labels.chain }}"
+          description: "A payment confirmed on one block (EVM, Solana confirmed, Bitcoin 1 confirmation) was contradicted (or not final in time) at finality; it is still marked succeeded. Check the execution before delivering more."
           runbook: "scripts/beta.sh logs rails-tracker | grep 'ALERT finalized re-check'; console > Executions > evidence trail"
 
       # rails: nearpay_rails_vault_event_rejected_total (vault logs dropped instead of forwarded)
