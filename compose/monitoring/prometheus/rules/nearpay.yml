@@ -128,6 +128,18 @@ groups:
           description: "billing-worker is not collecting due mandates (keeper key, NEAR RPC or gas)."
           runbook: "scripts/beta.sh logs billing-worker; check NP_KEEPER_ACCOUNT balance"
 
+      # rails: nearpay_rails_finality_recheck_total{chain,outcome} — post-success `finalized` re-check of payments
+      # confirmed on L2 block confirmations (Base/Arbitrum, ADR-0022). failed = at Ethereum finality the transfer's
+      # block hash changed, the receipt vanished or its status is not 1; timeout = not finalized within 2 h. The
+      # payment stays succeeded in rails: ops must review it (console evidence trail, finality_recheck_status).
+      - alert: FinalityRecheckFailed
+        expr: sum by (chain, outcome) (increase(nearpay_rails_finality_recheck_total{outcome=~"failed|timeout"}[30m])) > 0
+        labels: { severity: critical }
+        annotations:
+          summary: "Rails: {{ $value | humanize }} confirmed EVM payment(s) {{ $labels.outcome }} the finalized re-check on {{ $labels.chain }}"
+          description: "A payment settled on L2 confirmations was contradicted (or not finalized) at L1 finality; it is still marked succeeded. Check the execution before delivering more."
+          runbook: "scripts/beta.sh logs rails-tracker | grep 'ALERT finalized re-check'; console > Executions > evidence trail"
+
       # rails: nearpay_rails_vault_event_rejected_total (vault logs dropped instead of forwarded)
       - alert: VaultEventsRejected
         expr: increase(nearpay_rails_vault_event_rejected_total[30m]) > 0
