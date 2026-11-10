@@ -236,6 +236,7 @@ Each message says what is wrong, where, since when, and a first command to try. 
 | ErrorSpike / EdgeErrorSpike | `scripts/beta.sh logs <service>-api`; Grafana → Requests |
 | KillSwitchEngaged | live payments are stopped on purpose by sentinel: read `scripts/beta.sh logs sentinel-api`, decide in the console |
 | ReconciliationDifference, QuoteIntegrityFailure | money-path checks: stop and look (`logs payments-worker` / `logs rails-api`) before anything else |
+| FinalityRecheckFailed | a Base/Arbitrum payment confirmed on L2 blocks was contradicted (or not finalized in 2 h) at Ethereum finality; it still shows succeeded: `logs rails-tracker` (`ALERT finalized re-check`), open the execution's evidence trail in the console, hold delivery until checked |
 | OutboxBacklog, DeadLetters, WebhookBacklog | a service or NATS is stuck: `logs` of the service named, then `scripts/beta.sh up` |
 | KeeperCollectFailed, KeeperStuck, VaultEventsRejected | auto-debit collections: `logs billing-worker`; check the keeper account has NEAR for gas |
 | EmailCapLow, EmailCapped, EmailFailures | Resend dashboard → Usage / Logs; `logs notify-worker` |
