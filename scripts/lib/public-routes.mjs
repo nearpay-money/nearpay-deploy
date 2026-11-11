@@ -79,7 +79,13 @@ const route = (req) => {
 
 const sample = (path) => path.replace(/\{[a-z_]+\}/g, (p) => (p === "{code}" ? "ABCD-EFGH" : "x_1"));
 const anonymous = new Set(spec.PUBLIC_ANONYMOUS_ROUTES.map((r) => `${r.method} ${r.path}`));
-const GATEWAY_LIMITED = [/^\/v1\/payment_links\/\{id\}\/public/, /^\/v1\/invoices\/\{id\}\/public/, /^\/v1\/cli\/logins/, /^\/v1\/attestations\//];
+const GATEWAY_LIMITED = [
+  /^\/v1\/payment_links\/\{id\}\/public/,
+  /^\/v1\/invoices\/\{id\}\/public/,
+  /^\/v1\/cli\/logins/,
+  /^\/v1\/attestations\//,
+  /^\/v1\/auth\/google\//, // Continue with Google start + callback (ADR-0026)
+];
 const limited = (r) => anonymous.has(`${r.method} ${r.path}`) && GATEWAY_LIMITED.some((re) => re.test(r.path));
 const problems = [];
 let checked = 0;
@@ -98,6 +104,18 @@ for (const r of spec.PUBLIC_ROUTES) {
     else if (limited(r) && !hit.middlewares.some((x) => x.endsWith("ratelimit")))
       problems.push(`${r.method} ${host}${p} (${r.id}): anonymous route without a per-IP limit (router ${hit.name})`);
   }
+}
+// Continue with Google (ADR-0026): the redirect URI registered at Google is an alias of identity's callback route
+if (spec.googleCallback && spec.GOOGLE_CALLBACK_DASHBOARD_PATH) {
+  checked++;
+  const hit = route({ host: `dashboard.${domain}`, path: spec.GOOGLE_CALLBACK_DASHBOARD_PATH, method: "GET" });
+  const mw = hit?.middlewares ?? [];
+  if (hit?.owner !== "identity" || !mw.includes("google-callback-path") || !mw.some((x) => x.endsWith("ratelimit")))
+    problems.push(
+      `GET dashboard.${domain}${spec.GOOGLE_CALLBACK_DASHBOARD_PATH}: must reach identity through google-callback-path and a per-IP limit (router ${hit?.name ?? "none"})`,
+    );
+  if (!/path: \/v1\/auth\/google\/callback\b/.test(text.split(/^ {4}google-callback-path:\n/m)[1]?.slice(0, 120) ?? ""))
+    problems.push(`middleware google-callback-path must replace the path with ${spec.googleCallback.path}`);
 }
 const version = JSON.parse(readFileSync(join(dirname(entry), "../package.json"), "utf8")).version;
 if (problems.length) {

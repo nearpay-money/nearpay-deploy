@@ -15,13 +15,16 @@ edge:
     - { host: update.argotunnel.com, port: 443, note: "unused: --no-autoupdate" }
 
 services:
-  identity: # NEAR/EVM RPC for destination attestations (ERC-1271), Turnstile siteverify, Access JWKS
+  identity: # NEAR/EVM RPC for destination attestations (ERC-1271), Turnstile siteverify, Access JWKS, Google OIDC
     # Cloudflare Access signing keys (https://<team>/cdn-cgi/access/certs): the host is NP_CF_ACCESS_TEAM_DOMAIN
     # (.secrets/beta/beta.env); `scripts/beta.sh smoke` checks it from that value. Server-stage filter: add the host.
     - { host: "${NP_CF_ACCESS_TEAM_DOMAIN}", port: 443 }
     - { host: challenges.cloudflare.com, port: 443, beta_smoke: true }
     - { host: rpc.mainnet.near.org, port: 443, beta_smoke: true }
     - { host: free.rpc.fastnear.com, port: 443 }
+    # Continue with Google (ADR-0026, only while NP_GOOGLE_CLIENT_ID + the secret are set): code exchange and JWKS
+    - { host: oauth2.googleapis.com, port: 443, beta_smoke: true }
+    - { host: www.googleapis.com, port: 443, beta_smoke: true }
   payments: # Turnstile siteverify, NEAR RPC (verifier salt for live refund legs)
     - { host: challenges.cloudflare.com, port: 443 }
     - { host: rpc.mainnet.near.org, port: 443 }
