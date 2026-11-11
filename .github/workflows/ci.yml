@@ -32,6 +32,7 @@ jobs:
           mkdir -p .secrets/beta
           for f in cloudflared_token resend_api_key turnstile_sitekey turnstile_secret telegram_bot_token \
             grafana_admin_password ops_attestation_roots.pem; do echo placeholder > ".secrets/beta/$f"; done
+          : > .secrets/beta/google_client_secret # optional (ADR-0026): empty = Continue with Google off
           sed 's/__TELEGRAM_CHAT_ID__/1/' compose/monitoring/alertmanager/alertmanager.yml.tmpl > .secrets/beta/alertmanager.yml
           scripts/seed.sh live
           NP_CF_ACCESS_AUD=placeholder NP_CF_ACCESS_TEAM_DOMAIN=placeholder.cloudflareaccess.com \

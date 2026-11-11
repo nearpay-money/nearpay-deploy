@@ -18,6 +18,7 @@ What the pieces are (for orientation):
 | NearPay stack | your Mac (containers) | gateway (Traefik), services, Postgres, NATS, web apps |
 | Prometheus, Grafana, Alertmanager | your Mac, `127.0.0.1` only | metrics, the "NearPay beta" dashboard, alerts → Telegram |
 | Resend | cloud | sends NearPay's emails from `receipts@nearpay.money` (100 a day on the free plan) |
+| Google Cloud (optional) | cloud | an OAuth client for "Continue with Google" on the dashboard (step 13a); identity verifies Google's tokens itself |
 | UptimeRobot | cloud | checks `https://api.nearpay.money/healthz` every 5 minutes from outside |
 
 ---
@@ -191,6 +192,40 @@ pbpaste | tr -d '\n' > .secrets/beta/telegram_bot_token    # step 11 (123456789:
 | `grafana_admin_password` | script | Grafana (user `admin`) |
 | `ops_attestation_roots.pem` | script (Yubico's published roots) | identity (hardware keys, for later) |
 | `alertmanager.yml` | script | Alertmanager |
+| `google_client_secret` | you (step 13a, optional); the script creates it **empty** when absent (= Google sign-in off) | identity |
+
+## 13a. Optional: "Continue with Google" on the dashboard (ADR-0026)
+
+Merchants can then sign up and sign in with their Google account next to the passkey. Skip this step and the dashboard
+simply shows no Google button (everything else works). This is **not** the console login (step 7 stays as it is), and
+Google never replaces the passkey for sensitive actions (payout destinations, refunds, API keys, team).
+
+In the [Google Cloud console](https://console.cloud.google.com/), signed in as `nearpaydotmoney@gmail.com`:
+
+- [ ] **Project**: top bar → project picker → **New project** → name `NearPay` → Create, and select it.
+- [ ] **OAuth consent screen** (menu → **Google Auth Platform** → **Branding**; older consoles: **APIs & Services → OAuth consent screen**) → **Get started**:
+  - App name `NearPay`, user support email `nearpaydotmoney@gmail.com`.
+  - Audience: **External**.
+  - Contact email: `nearpaydotmoney@gmail.com` → agree to the policy → **Create**.
+  - **Branding**: app home page `https://nearpay.money`, privacy policy and terms links on `https://nearpay.money` if you have them, **Authorized domains**: add `nearpay.money` → Save.
+  - **Data access** → **Add or remove scopes** → tick exactly **`openid`**, **`.../auth/userinfo.email`** (`email`) and **`.../auth/userinfo.profile`** (`profile`) → Update → Save. Nothing else (these are non-sensitive scopes: no Google verification review is needed).
+  - **Audience**: while the app is in **Testing**, only the test users you add here can sign in (up to 100) — add the Google accounts of your beta merchants, or press **Publish app** to open it to every Google account (with only these three scopes Google publishes without a review; the consent screen shows "NearPay" and nearpay.money).
+- [ ] **Clients** (Google Auth Platform → **Clients**; older consoles: **APIs & Services → Credentials → Create credentials → OAuth client ID**) → **Create client**:
+  - Application type: **Web application**, name `NearPay dashboard`.
+  - **Authorized JavaScript origins**: `https://dashboard.nearpay.money`
+  - **Authorized redirect URIs**: `https://dashboard.nearpay.money/api/auth/google/callback` (exactly this, no trailing slash)
+  - **Create**. Copy the **Client ID** (`…apps.googleusercontent.com`) and the **Client secret** (`GOCSPX-…`; download the JSON if you want a copy — keep it out of chats and repositories).
+- [ ] On the Mac, from `nearpay-deploy`:
+
+  ```sh
+  pbpaste | tr -d '\n' > .secrets/beta/google_client_secret     # the Client secret (GOCSPX-…)
+  echo 'NP_GOOGLE_CLIENT_ID=<paste the Client ID>' >> .secrets/beta/beta.env   # not a secret
+  scripts/beta.sh up
+  ```
+
+- [ ] `beta.sh up` prints **Continue with Google: on**, and the smoke test checks that the dashboard offers it. Open <https://dashboard.nearpay.money/signin>: the white **Continue with Google** button is above the passkey option.
+- [ ] Check it once with a Google account that has **no** NearPay user yet: you land on the setup checklist of a new account. A Google account whose email already has a NearPay user is refused on purpose ("This email already has a NearPay account. Sign in with your passkey, then connect Google in Settings."): sign in with the passkey, then **Settings → Account & payments → Sign-in methods → Connect Google**.
+- [ ] To switch it off again: empty the secret (`: > .secrets/beta/google_client_secret`) and run `scripts/beta.sh up`. Users who only ever used Google and never added a passkey then cannot sign in until it is on again (the API's email recovery, which adds a passkey, has no dashboard page yet), so ask them to add a passkey first (the dashboard prompts them at their first sensitive action). To rotate the secret: add a new secret to the client in Google Cloud, write it to the file, `scripts/beta.sh up`, then delete the old one in Google Cloud.
 
 ## 14. Start the beta
 
@@ -201,7 +236,7 @@ scripts/beta.sh up
 - [ ] It checks the Mac (Docker memory, disk), that every repository is on a clean `main` (and pulls it), the secrets, the Telegram chat, the Access identifiers, the live settings, then builds and starts everything and runs the smoke test. The first run takes a while (image builds). Paste back any `FAIL` or error.
 - [ ] At the end it prints the public URLs and "Smoke test passed". Grafana: <http://127.0.0.1:3000> (user `admin`, password in `.secrets/beta/grafana_admin_password`), dashboard **NearPay beta**.
 - [ ] **Sign in to the console**: open <https://ops.nearpay.money> → Cloudflare Access → enter `nearpaydotmoney@gmail.com` and the one-time code emailed to it (or **Sign in with Google** if you set it up in step 7). Team domain: `nearpay-money.cloudflareaccess.com`. You are the first operator (`ops_admin`) automatically (`NP_OPS_BOOTSTRAP_EMAIL`); nothing to enrol.
-- [ ] Sign up as a merchant yourself at <https://dashboard.nearpay.money> to check the flow (Turnstile, email code, passkey).
+- [ ] Sign up as a merchant yourself at <https://dashboard.nearpay.money> to check the flow (Turnstile, email code, passkey; and **Continue with Google** if you did step 13a).
 
 ## 15. Live setup and the vault (mainnet checklist)
 

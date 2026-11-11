@@ -60,6 +60,23 @@ http:
       priority: 150
       middlewares: [strip-internal-headers, cli-login-ratelimit, api-prefix, authz, api-headers]
       service: identity
+    # Continue with Google (ADR-0026, identity §22). Google redirects the browser to the redirect URI registered in the
+    # Google Cloud console, https://dashboard.<domain>/api/auth/google/callback; this router rewrites it to identity's
+    # spec route /v1/auth/google/callback (query kept) and runs the identity chain (ForwardAuth: an anonymous route).
+    # The callback always answers 303 to a dashboard page. Starting a flow is anonymous too. Both get a per-IP limit in
+    # front of identity's own (anonymous 10 rps per IP; starts: 30 per 10 min per IP).
+    identity-google-callback:
+      entryPoints: [websecure]
+      rule: 'Host(`dashboard.{{ $d }}`) && Method(`GET`) && Path(`/api/auth/google/callback`)'
+      priority: 160
+      middlewares: [strip-internal-headers, google-auth-ratelimit, google-callback-path, authz, api-headers]
+      service: identity
+    identity-google-public:
+      entryPoints: [websecure]
+      rule: '((Host(`pay.{{ $d }}`) || Host(`dashboard.{{ $d }}`)) && ((Method(`POST`) && Path(`/api/v1/auth/google/start`)) || (Method(`GET`) && Path(`/api/v1/auth/google/callback`)))) || (Host(`api.{{ $d }}`) && ((Method(`POST`) && Path(`/v1/auth/google/start`)) || (Method(`GET`) && Path(`/v1/auth/google/callback`))))'
+      priority: 150
+      middlewares: [strip-internal-headers, google-auth-ratelimit, api-prefix, authz, api-headers]
+      service: identity
     compliance:
       entryPoints: [websecure]
       rule: '(Host(`api.{{ $d }}`) && (Path(`/v1/account/kyb`) || PathPrefix(`/v1/account/kyb/`) || Path(`/webhooks/kyb`) || PathPrefix(`/webhooks/kyb/`))) || ((Host(`pay.{{ $d }}`) || Host(`dashboard.{{ $d }}`)) && (Path(`/api/v1/account/kyb`) || PathPrefix(`/api/v1/account/kyb/`) || Path(`/api/webhooks/kyb`) || PathPrefix(`/api/webhooks/kyb/`)))'
@@ -238,6 +255,17 @@ http:
     healthz-path:
       replacePath:
         path: /healthz
+    # Continue with Google: the registered redirect URI → identity's spec route (replacePath keeps the query string)
+    google-callback-path:
+      replacePath:
+        path: /v1/auth/google/callback
+    # Anonymous Google flow start and Google's redirect back: per-IP limit before identity's checks.
+    google-auth-ratelimit:
+      rateLimit:
+        average: 2
+        burst: 10
+        period: 1s
+        {{ $perIp }}
     sse-headers:
       headers:
         customResponseHeaders:

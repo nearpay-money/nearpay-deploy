@@ -156,6 +156,7 @@ preflight_secrets() {
   check_secret telegram_bot_token "Telegram bot token from @BotFather (step 10)" '^[0-9]{5,}:[A-Za-z0-9_-]{30,}$' \
     "it looks like 123456789:AA… (one line)" || missing=1
   [ "$missing" = 0 ] || die "create the missing files (one value per file, nothing else), then run this again"
+  preflight_google
   # containers run as their own users: the files must be readable inside .secrets (0700 keeps them private)
   chmod 644 "$beta"/* 2>/dev/null || true
 
@@ -177,6 +178,21 @@ preflight_secrets() {
     mv "$tmp" "$beta/ops_attestation_roots.pem" && chmod 644 "$beta/ops_attestation_roots.pem"
     ok "downloaded Yubico attestation roots → .secrets/beta/ops_attestation_roots.pem"
   fi
+}
+
+preflight_google() { # Continue with Google (ADR-0026), optional: docs/beta-launch.md step 13a
+  local id f="$beta/google_client_secret"
+  id="$(envval NP_GOOGLE_CLIENT_ID)"
+  # Compose needs the secret file to exist; an empty file leaves Google sign-in off (identity starts either way)
+  if [ ! -e "$f" ]; then (umask 022 && : >"$f"); fi
+  if [ -z "$id" ] && [ ! -s "$f" ]; then ok "Continue with Google: off (optional, step 13a)"; return 0; fi
+  if [ -z "$id" ]; then warn "Continue with Google: off — .secrets/beta/google_client_secret is set but NP_GOOGLE_CLIENT_ID is empty (put it in .secrets/beta/beta.env)"; return 0; fi
+  if [ ! -s "$f" ]; then warn "Continue with Google: off — NP_GOOGLE_CLIENT_ID is set but .secrets/beta/google_client_secret is empty"; return 0; fi
+  printf '%s' "$id" | grep -Eq '^[0-9]+-[a-z0-9]+\.apps\.googleusercontent\.com$' ||
+    die "NP_GOOGLE_CLIENT_ID should look like 123456789012-abc….apps.googleusercontent.com (Google Cloud > Clients)"
+  readfile "$f" | grep -Eq '^[A-Za-z0-9_-]{20,}$' ||
+    die ".secrets/beta/google_client_secret does not look like a client secret (one line, usually GOCSPX-…)"
+  ok "Continue with Google: on (client $id; redirect URI https://dashboard.nearpay.money/api/auth/google/callback)"
 }
 
 preflight_telegram() {
@@ -302,6 +318,15 @@ smoke() {
   if [ "$code" = 200 ]; then ok "https://js.nearpay.money/v1/nearpay.js → 200"; else bad "https://js.nearpay.money/v1/nearpay.js → ${code:-no answer}"; fail=1; fi
   loc="$(curl -sS -o /dev/null -w '%{http_code} %{redirect_url}' --max-time 10 https://www.nearpay.money/x 2>/dev/null || true)"
   case "$loc" in "301 https://nearpay.money/x") ok "https://www.nearpay.money → https://nearpay.money" ;; *) bad "www redirect: got '$loc'"; fail=1 ;; esac
+
+  # Continue with Google (ADR-0026): the dashboard asks identity whether to show the button
+  local methods want=false
+  [ -n "$(envval NP_GOOGLE_CLIENT_ID)" ] && [ -s "$beta/google_client_secret" ] && want=true
+  methods="$(curl -sS --max-time 10 https://dashboard.nearpay.money/api/v1/auth/methods 2>/dev/null || true)"
+  case "$methods" in
+    *"\"google\":$want"*) ok "Continue with Google: $([ "$want" = true ] && echo on || echo off) (GET /v1/auth/methods)" ;;
+    *) bad "GET https://dashboard.nearpay.money/api/v1/auth/methods → '${methods:0:120}' (expected google:$want; beta.sh logs identity-api)"; fail=1 ;;
+  esac
 
   step "Cloudflare Access in front of the console"
   for h in "https://ops.nearpay.money/" "https://ops.nearpay.money/api/ops/merchants"; do
