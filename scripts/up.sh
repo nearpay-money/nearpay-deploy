@@ -168,7 +168,7 @@ publish_repo() {
     set -e
     export COREPACK_ENABLE_DOWNLOAD_PROMPT=0
     cd "$work/$repo"
-    pnpm install --frozen-lockfile --config.@nearpay:registry="$registry/" --config.@nearpay-internal:registry="$registry/"
+    pnpm install --frozen-lockfile --config.@nearpay-money:registry="$registry/" --config.@nearpay-internal:registry="$registry/"
     NP_REGISTRY_URL="$registry" NP_REGISTRY_PASSWORD="$(cat "$secrets/registry_password")" node scripts/release-local.mjs --skip-verify
   ) </dev/null >"$log" 2>&1; then
     tail -20 "$log" >&2
@@ -178,7 +178,7 @@ publish_repo() {
 }
 publish_repo nearpay-spec
 publish_repo nearpay-kit
-# client packages the merchant demo installs (@nearpay/node, @nearpay/x402, @nearpay/agent-signer)
+# client packages the merchant demo installs (@nearpay-money/node, @nearpay-money/x402, @nearpay-money/agent-signer)
 for repo in nearpay-node nearpay-agentkit; do [ -d "$work/$repo" ] && publish_repo "$repo"; done
 
 # ---- static web apps -------------------------------------------------------------------------
@@ -223,7 +223,7 @@ build_site() {
     if [ "$repo" = nearpay-checkout ] && [ -n "$checkout_solana_rpc" ]; then export VITE_SOLANA_RPC_URL="$checkout_solana_rpc"; fi
     if [ -n "$turnstile_sitekey" ]; then export VITE_TURNSTILE_SITEKEY="$turnstile_sitekey"; fi
     if [ "$mode" = beta ]; then export VITE_NEAR_NETWORK=mainnet; fi
-    pnpm install --frozen-lockfile --config.@nearpay:registry="$registry/" --config.@nearpay-internal:registry="$registry/"
+    pnpm install --frozen-lockfile --config.@nearpay-money:registry="$registry/" --config.@nearpay-internal:registry="$registry/"
     pnpm build
   ) </dev/null >"$log" 2>&1; then
     tail -20 "$log" >&2

@@ -5,7 +5,7 @@
 // Traefik), and the anonymous routes the gateway limits per IP (GATEWAY_LIMITED: hosted payment-link and invoice pages,
 // CLI login start/poll, sentinel attestations) must hit a router with a rate-limit middleware.
 //
-//   node scripts/lib/public-routes.mjs [<@nearpay/spec public entry>]
+//   node scripts/lib/public-routes.mjs [<@nearpay-money/spec public entry>]
 //
 // The entry defaults to ../nearpay-spec/packages/spec-public/dist/public-entry.js (a built spec checkout). Exits 1 and
 // lists the routes that would be misrouted. Only the rule matchers routes.yaml uses are understood (Host, Path,
@@ -102,7 +102,7 @@ for (const r of spec.PUBLIC_ROUTES) {
 const version = JSON.parse(readFileSync(join(dirname(entry), "../package.json"), "utf8")).version;
 if (problems.length) {
   for (const p of problems) console.error(`public-routes: ${p}`);
-  console.error(`public-routes: ${problems.length} problem(s) against @nearpay/spec ${version}`);
+  console.error(`public-routes: ${problems.length} problem(s) against @nearpay-money/spec ${version}`);
   process.exit(1);
 }
-console.log(`public-routes: ${spec.PUBLIC_ROUTES.length} routes × 3 hosts (${checked}) routed to their owners (@nearpay/spec ${version})`);
+console.log(`public-routes: ${spec.PUBLIC_ROUTES.length} routes × 3 hosts (${checked}) routed to their owners (@nearpay-money/spec ${version})`);

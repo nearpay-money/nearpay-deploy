@@ -1,4 +1,4 @@
-# Local npm registry (Verdaccio) for @nearpay/* and @nearpay-internal/* packages (system audit S-11).
+# Local npm registry (Verdaccio) for @nearpay-money/* and @nearpay-internal/* packages (system audit S-11).
 # Sibling repos consume published artifacts from here (ADR-0001) until remote registries exist.
 # No uplinks: only NearPay scopes are served; every other package comes from npmjs directly.
 storage: /verdaccio/storage/data
@@ -11,7 +11,11 @@ auth:
     file: /verdaccio/storage/htpasswd
     max_users: 10
 packages:
-  "@nearpay/*":
+  "@nearpay-money/*":
+    access: $all
+    publish: $authenticated
+    unpublish: $authenticated
+  "@nearpay-money/*":
     access: $all
     publish: $authenticated
     unpublish: $authenticated
