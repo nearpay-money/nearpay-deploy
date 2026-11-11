@@ -20,6 +20,8 @@ jobs:
           npm install -g pnpm@9.15.9
           pnpm -C scripts/live-setup install --frozen-lockfile
           pnpm -C scripts/live-setup test
+      - name: Deploy script tests (routing-health smoke, alert rules, runbook)
+        run: node --test --test-reporter=spec scripts/test/*.test.mjs
       - name: Seed throwaway test keys
         run: scripts/seed.sh keys
       - name: Compose configuration (every profile)

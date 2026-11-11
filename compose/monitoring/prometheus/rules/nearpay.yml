@@ -62,6 +62,35 @@ groups:
           description: "Sentinel reports the kill switch on; live quoting is refused until ops release it."
           runbook: "Console (ops.nearpay.money) > Kill switch; scripts/beta.sh logs sentinel-api"
 
+      # rails: nearpay_rails_routing_available{livemode} (0 = every payment option is unavailable: the payer sees
+      # "Payments are temporarily unavailable") and nearpay_rails_routing_blocked{livemode,reason} (1 per blocking
+      # reason: kill_switch_engaged, kill_switch_unknown, treasury_unset, cross_chain_paused, settlement_price_stale,
+      # settlement_price_missing, settlement_price_depeg, settlement_price_disagree, fx_unavailable). The description
+      # lists the current reasons with the fix for each (same hints as scripts/lib/routing-health.mjs).
+      - alert: LivePaymentsNotRouting
+        expr: max(nearpay_rails_routing_available{livemode="true"}) == 0
+        for: 2m
+        labels: { severity: critical }
+        annotations:
+          summary: "Live payments cannot route: every payment option is unavailable"
+          description: |-
+            Payers see "Payments are temporarily unavailable". Blocking:
+            {{- range query `max by (reason) (nearpay_rails_routing_blocked{livemode="true"}) == 1` }}
+            - {{ .Labels.reason }}: {{ if eq .Labels.reason "kill_switch_engaged" }}release the kill switch in the console once you know why it was engaged{{ else if eq .Labels.reason "kill_switch_unknown" }}rails cannot read sentinel's kill switch (logs rails-api: ALERT kill_switch_unknown){{ else if eq .Labels.reason "treasury_unset" }}set NP_TREASURY_ACCOUNT and run scripts/beta.sh up{{ else if eq .Labels.reason "cross_chain_paused" }}scripts/beta.sh ops rails flag-set cross_chain_enabled true 'resume'{{ else if eq .Labels.reason "settlement_price_stale" }}1Click prices are not reaching rails (logs rails-feeds: ALERT token_registry_refresh_failed; logs egress-proxy){{ else if eq .Labels.reason "settlement_price_missing" }}a price source lacks the settlement asset (logs rails-feeds){{ else if eq .Labels.reason "settlement_price_depeg" }}the settlement stablecoin is off its peg: wait{{ else if eq .Labels.reason "settlement_price_disagree" }}1Click and CoinGecko disagree: logs rails-feeds, usually clears{{ else if eq .Labels.reason "fx_unavailable" }}no current ECB rate (logs rails-feeds, egress proxy){{ else }}see scripts/beta.sh routing{{ end }}
+            {{- end }}
+          runbook: "scripts/beta.sh routing; docs/beta-launch.md 'Payments are temporarily unavailable'"
+
+      # rails: nearpay_rails_token_registry_age_seconds{livemode} — seconds since the token registry last refreshed from
+      # 1Click (live) / the sandbox (test); +Inf = never. Refreshes run every 30 s; prices go stale after 5 min.
+      - alert: TokenRegistryStale
+        expr: max by (livemode) (nearpay_rails_token_registry_age_seconds) > 300
+        for: 2m
+        labels: { severity: warning }
+        annotations:
+          summary: "Token registry (livemode={{ $labels.livemode }}) not refreshed for {{ $value | humanizeDuration }}"
+          description: "rails-feeds cannot load the token list (1Click unreachable through the egress proxy, auth, empty list); settlement prices go stale and payments stop routing."
+          runbook: "scripts/beta.sh logs rails-feeds | grep 'ALERT token_registry_refresh_failed'; scripts/beta.sh logs egress-proxy"
+
       # payments: nearpay_payments_reconciliation_diffs_total (target: zero)
       - alert: ReconciliationDifference
         expr: increase(nearpay_payments_reconciliation_diffs_total[1h]) > 0

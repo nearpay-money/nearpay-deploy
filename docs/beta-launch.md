@@ -272,6 +272,8 @@ Each message says what is wrong, where, since when, and a first command to try. 
 | ServiceDown / PlatformComponentDown | `scripts/beta.sh status`, then `scripts/beta.sh logs <container>`; `scripts/beta.sh up` restarts what is missing |
 | ErrorSpike / EdgeErrorSpike | `scripts/beta.sh logs <service>-api`; Grafana → Requests |
 | KillSwitchEngaged | live payments are stopped on purpose by sentinel: read `scripts/beta.sh logs sentinel-api`, decide in the console |
+| LivePaymentsNotRouting | every live payment option is unavailable (payers see "Payments are temporarily unavailable"): the message lists the reasons; see "Payments are temporarily unavailable" below |
+| TokenRegistryStale | rails cannot load the token list from 1Click: `scripts/beta.sh logs rails-feeds \| grep 'ALERT token_registry_refresh_failed'`, then `scripts/beta.sh logs egress-proxy` |
 | ReconciliationDifference, QuoteIntegrityFailure | money-path checks: stop and look (`logs payments-worker` / `logs rails-api`) before anything else |
 | FinalityRecheckFailed | a payment confirmed on one block (EVM incl. Ethereum, Solana `confirmed`, Bitcoin 1 confirmation) was contradicted at finality — EVM `finalized` (2 h), Solana `finalized` (30 min), Bitcoin 6 confirmations (6 h) — or not final in that window; it still shows succeeded: `logs rails-tracker` (`ALERT finalized re-check`), open the execution's evidence trail in the console, hold delivery until checked |
 | OutboxBacklog, DeadLetters, WebhookBacklog | a service or NATS is stuck: `logs` of the service named, then `scripts/beta.sh up` |
@@ -279,6 +281,32 @@ Each message says what is wrong, where, since when, and a first command to try. 
 | EmailCapLow, EmailCapped, EmailFailures | Resend dashboard → Usage / Logs; `logs notify-worker` |
 | DiskLow, DiskCritical | `docker system df`, `docker image prune`, `docker builder prune`; raise Docker Desktop's disk limit |
 | SingleOperatorAction (notice) | confirm it was you (see "Console sign-in") |
+
+### "Payments are temporarily unavailable"
+
+The checkout shows this when rails marks every payment option unavailable. Rails always knows why: see the reasons with
+
+```sh
+scripts/beta.sh routing                          # from Prometheus: ok, or each blocking reason with its fix
+scripts/beta.sh ops rails routing-health live    # straight from rails: reasons, settlement assets affected, registry age
+```
+
+(Prometheus: `nearpay_rails_routing_available{livemode="true"}` is 0 and `nearpay_rails_routing_blocked{livemode="true",reason="…"}` is 1 per reason; rails-api logs `ALERT routing_blocked` when it starts, and payments-api logs `no payment option available` once per checkout session with the same codes.)
+
+| Reason | What it means | Fix |
+|---|---|---|
+| `kill_switch_engaged` | sentinel's kill switch stops live payments on purpose | find out why (`scripts/beta.sh logs sentinel-api`, console audit log), then release it in the console (**Kill switch**) |
+| `kill_switch_unknown` | rails could not read the kill switch from sentinel, so it refuses live payments (fail closed) | `scripts/beta.sh logs rails-api \| grep 'ALERT kill_switch_unknown'`: `cause` says why (`auth` = rails' service token refused, `network:*`/`timeout` = sentinel unreachable, `sentinel_url_unset`); check `sentinel-api` is up. It clears by itself within 10 s of sentinel answering |
+| `treasury_unset` | `NP_TREASURY_ACCOUNT` (NearPay's live fee recipient) is not configured | set it in `compose/env/local.env` (mainnet checklist C.1), then `scripts/beta.sh up` |
+| `cross_chain_paused` | an operator paused cross-chain routes (control flag) | `scripts/beta.sh ops rails flag-set cross_chain_enabled true "resume: <why>"` |
+| `settlement_price_stale` | the settlement asset's 1Click price is older than 5 minutes (by 1Click's own timestamp) | rails-feeds is not refreshing prices: `scripts/beta.sh logs rails-feeds \| grep 'ALERT token_registry_refresh_failed'` (`error_class` says why: `proxy_denied`, `network:*`, `auth`, `timeout`, `empty`), then `scripts/beta.sh logs egress-proxy` |
+| `settlement_price_missing` | a price source has no price for the settlement asset (1Click list, or CoinGecko for non-stablecoins) | `scripts/beta.sh logs rails-feeds` (token refresh, secondary-prices) |
+| `settlement_price_depeg` | the settlement stablecoin is more than 2 % off its peg: NearPay refuses to settle at par | nothing to fix in NearPay; wait, or settle in another asset |
+| `settlement_price_disagree` | 1Click and CoinGecko disagree by more than 1.5 % on a non-stablecoin | usually clears by itself; `scripts/beta.sh logs rails-feeds` |
+| `fx_unavailable` | no current ECB rate for the stablecoin's peg currency | `scripts/beta.sh logs rails-feeds \| grep -i fx`; check the egress proxy reaches the ECB |
+| `token_registry_stale` (warning) | the token list has not refreshed for 90 s; prices go stale (and payments stop) after 5 minutes | as for `settlement_price_stale` |
+
+The price checks are never relaxed to get payments going again: fix the feed, not the rule.
 
 UptimeRobot emails you separately when the site is unreachable from outside: check the Mac is awake, Docker Desktop is running, then `scripts/beta.sh up`.
 
@@ -288,7 +316,8 @@ UptimeRobot emails you separately when the site is unreachable from outside: che
 |---|---|
 | `scripts/beta.sh status` | containers, firing alerts, keep-awake, memory per container, the tunnel hostnames |
 | `scripts/beta.sh logs <container>` | follow logs (`cloudflared`, `traefik`, `payments-api`, `notify-worker`, …) |
-| `scripts/beta.sh smoke` | public URLs, Access on ops, Prometheus targets, outbound hosts, Telegram test message |
+| `scripts/beta.sh smoke` | public URLs, Access on ops, Prometheus targets, live payments can route, outbound hosts, Telegram test message |
+| `scripts/beta.sh routing` | can live payments route? if not, each reason with its fix ("Payments are temporarily unavailable") |
 | `scripts/beta.sh up` | update to the latest `main` everywhere and restart what changed (safe to repeat) |
 | `scripts/beta.sh down` | stop the beta (data is kept) and let the Mac sleep |
 | `scripts/beta.sh telegram` | find the Telegram chat again (e.g. after a new bot token) |
