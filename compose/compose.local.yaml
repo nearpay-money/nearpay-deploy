@@ -30,7 +30,7 @@ services:
         aliases:
           - api.${NP_BASE_DOMAIN:-nearpay.localhost}
 
-  # Local npm registry for @nearpay/* and @nearpay-internal/* (system audit S-11; ADR-0001).
+  # Local npm registry for @nearpay-money/* and @nearpay-internal/* (system audit S-11; ADR-0001).
   registry:
     image: verdaccio/verdaccio:6.10.6
     restart: unless-stopped

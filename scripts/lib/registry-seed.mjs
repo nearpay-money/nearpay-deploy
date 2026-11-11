@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Seeds the local package registry with the exact @nearpay/* and @nearpay-internal/* tarballs that the repos'
+ * Seeds the local package registry with the exact @nearpay-money/* and @nearpay-internal/* tarballs that the repos'
  * lockfiles were resolved against (`registry-seed/`, checked by SHA512SUMS).
  *
  * Why: the repos pin older contract versions too (nearpay-kit 0.1.2 depends on spec 0.1.1), and lockfiles record
@@ -95,7 +95,8 @@ async function main() {
         replaced++;
       }
       const tag = highest.get(e.name) === e.version ? "latest" : `seed-${e.version}`;
-      npm(["publish", e.file, "--access", "public", "--tag", tag]);
+      // The public @nearpay-money/* manifests carry publishConfig.provenance (for npmjs); a local seed never attests.
+      npm(["publish", e.file, "--access", "public", "--tag", tag, "--provenance=false"]);
       added++;
     }
     console.log(`registry seed: ${entries.length} tarballs, ${added - replaced} published, ${replaced} replaced`);

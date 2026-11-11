@@ -1,6 +1,6 @@
 # registry-seed
 
-The exact `@nearpay/*` and `@nearpay-internal/*` tarballs that every repo's `pnpm-lock.yaml` was resolved against,
+The exact `@nearpay-money/*` and `@nearpay-internal/*` tarballs that every repo's `pnpm-lock.yaml` was resolved against,
 including the older contract versions still pinned (for example `nearpay-kit` 0.1.2 depends on spec 0.1.1).
 `scripts/up.sh` publishes them to the local registry byte for byte (`scripts/lib/registry-seed.mjs`), so a clean
 checkout installs with `--frozen-lockfile`. Rebuilding from source can't recreate old versions, and a rebuilt
