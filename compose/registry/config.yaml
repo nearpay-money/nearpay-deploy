@@ -15,7 +15,8 @@ packages:
     access: $all
     publish: $authenticated
     unpublish: $authenticated
-  "@nearpay-money/*":
+  # Pre-rename local-only scope (never published publicly; kept so older local tarballs still resolve)
+  "@nearpay/*":
     access: $all
     publish: $authenticated
     unpublish: $authenticated
