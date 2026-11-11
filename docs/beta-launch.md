@@ -219,7 +219,7 @@ Run **`claude/mainnet-checklist.md` sections A → C** with these beta differenc
   scripts/beta.sh ops compliance kyb-decide <acct_…> approved --reason "beta: details reviewed by owner"
   ```
 
-  The beta runs strict (`NP_ENV=server`) but with the destination **cool-off set to 0** (`NP_COOLOFF_SECONDS=0`): a new settlement destination is usable at once; its attestation, step-up and the activation email still apply.
+  The beta runs strict (`NP_ENV=server`). Payout wallets have **no cool-off** (owner decision 2026-11-11, final; `NP_COOLOFF_SECONDS=0`, also identity's default): a new payout wallet is active, and live payments to it possible, as soon as its ownership is signed (and a second owner/admin approves, when the account has two); its screening, step-up and the "payout wallet active" security email still apply.
 - [ ] **C.6**: the dashboard shows **Live**; the console shows the kill switch **off**; Grafana's "Kill switch" tile says off.
 
 ## Console sign-in (decided 2026-11-09)

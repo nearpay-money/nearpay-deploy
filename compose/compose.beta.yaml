@@ -96,8 +96,9 @@ services:
   # Console sign-in (owner decision 2026-11-09): Google login through Cloudflare Access, the JWT verified by identity
   # (NP_OPS_AUTH_MODE=cloudflare_access; JWKS from https://$NP_CF_ACCESS_TEAM_DOMAIN/cdn-cgi/access/certs over the
   # egress network). The ops CLI (`scripts/beta.sh ops identity …`) runs inside identity-api with the same env. The
-  # two-person rule is adaptive (no flag; identity/sentinel/compliance defaults). Cool-off: NP_COOLOFF_SECONDS from
-  # beta.env (0). The hardware-key wiring (AAGUID list, attestation roots) stays for passkey mode.
+  # two-person rule is adaptive (no flag; identity/sentinel/compliance defaults). Payout wallets activate at once
+  # (NP_COOLOFF_SECONDS=0 from beta.env; owner decision 2026-11-11). The hardware-key wiring (AAGUID list,
+  # attestation roots) stays for passkey mode.
   identity-api: &identity-beta
     environment:
       NP_OPS_AUTH_MODE: ${NP_OPS_AUTH_MODE:-cloudflare_access}
