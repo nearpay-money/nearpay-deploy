@@ -371,7 +371,8 @@ services:
       NP_TURNSTILE_SECRET_FILE: /run/secrets/turnstile_secret
       NP_WEBAUTHN_RP_ID: ${NP_BASE_DOMAIN:-nearpay.localhost}
       NP_WEBAUTHN_ORIGINS: https://dashboard.${NP_BASE_DOMAIN:-nearpay.localhost}${NP_PORT_SUFFIX:-},https://ops.${NP_BASE_DOMAIN:-nearpay.localhost}${NP_PORT_SUFFIX:-}
-      NP_COOLOFF_SECONDS: ${NP_COOLOFF_SECONDS:-86400}
+      # payout wallets activate at attestation/approval; no cool-off by default (owner decision 2026-11-11, final)
+      NP_COOLOFF_SECONDS: ${NP_COOLOFF_SECONDS:-0}
       NP_NEAR_RPC_URLS: ${NP_NEAR_RPC_URLS:-https://rpc.mainnet.near.org,https://free.rpc.fastnear.com}
       # console (step 2.1/2.2): operator passkeys; RP id = host of NP_OPS_ORIGIN (x-env). The server stage adds
       # NP_OPS_ATTESTATION_ROOTS_FILE (vendor attestation roots, required there).
