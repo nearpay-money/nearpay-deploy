@@ -5,7 +5,8 @@
 #   scripts/beta.sh down             stop the beta (data is kept) and let the Mac sleep again
 #   scripts/beta.sh status           containers, firing alerts, keep-awake, memory per container
 #   scripts/beta.sh logs <service>   follow one container's logs (e.g. payments-api, cloudflared, traefik)
-#   scripts/beta.sh smoke            public URLs, Cloudflare Access on ops, Prometheus targets, egress hosts, Telegram
+#   scripts/beta.sh smoke            public URLs, Cloudflare Access on ops, Prometheus targets, live routing, egress hosts, Telegram
+#   scripts/beta.sh routing          can live payments route? blocking reasons with a fix each (rails routing health)
 #   scripts/beta.sh telegram         (re)discover the Telegram chat for alerts and send a test message
 #   scripts/beta.sh ops <svc> <args> run a service's ops CLI, e.g. `ops compliance kyb-show <acct_…>`
 #
@@ -298,6 +299,38 @@ keep_awake() {
   ok "keep-awake on (caffeinate pid $!); keep the Mac plugged in with the lid open"
 }
 
+# ---- live routing (rails routing health via Prometheus) -------------------------------------------------------------
+# Prints ok / FAIL with each blocking reason and its fix (scripts/lib/routing-health.mjs). $1 = tries (15 s apart) while
+# the answer is not "ok": right after `up`, rails needs a few seconds to read the kill switch and Prometheus to scrape.
+routing_check() {
+  local tries="${1:-1}" n=0 out status rc port
+  port="$(envval NP_PROMETHEUS_PORT)"
+  local url="http://127.0.0.1:${port:-9090}"
+  while :; do
+    rc=0
+    out="$(node "$deploy/scripts/lib/routing-health.mjs" "$url" 2>&1)" || rc=$?
+    n=$((n + 1))
+    [ "$rc" = 0 ] || [ "$n" -ge "$tries" ] && break
+    [ "$n" = 1 ] && printf '  …    waiting for live routing health (%s)\n' "$(printf '%s' "$out" | head -1)"
+    sleep 15
+  done
+  status="$(printf '%s\n' "$out" | head -1)"
+  case "$status" in
+    ok)
+      ok "live payments can route (nearpay_rails_routing_available = 1)"
+      printf '%s\n' "$out" | tail -n +2 | while IFS= read -r l; do [ -n "$l" ] && warn "$l"; done
+      return 0 ;;
+    blocked)
+      bad "live payments cannot route: payers see 'Payments are temporarily unavailable'. Blocking reasons and fixes:"
+      printf '%s\n' "$out" | tail -n +2 | while IFS= read -r l; do [ -n "$l" ] && printf '         %s\n' "$l"; done
+      say "         details: scripts/beta.sh ops rails routing-health live"
+      return 1 ;;
+    *)
+      bad "live routing health unknown: $(printf '%s\n' "$out" | tail -n +2 | head -1) (scripts/beta.sh logs rails-api)"
+      return 1 ;;
+  esac
+}
+
 # ---- smoke ----------------------------------------------------------------------------------------------------------
 smoke() {
   local fail=0 h code loc i
@@ -361,6 +394,9 @@ smoke() {
   esac
   if curl -fsS --max-time 5 "http://127.0.0.1:$(envval NP_ALERTMANAGER_PORT)/-/ready" >/dev/null 2>&1; then ok "Alertmanager ready"
   else bad "Alertmanager not ready (beta.sh logs alertmanager)"; fail=1; fi
+
+  step "Live payments can route (rails routing health)"
+  routing_check 6 || fail=1
 
   step "Internet hosts the services call (compose/egress/allowlist.yaml)"
   local line host port
@@ -430,6 +466,10 @@ case "$cmd" in
     bcompose logs -f --tail 200 "$1"
     ;;
   smoke) smoke ;;
+  routing)
+    step "Live payments can route (rails routing health)"
+    routing_check 1 || { say ""; say "Runbook: docs/beta-launch.md 'Payments are temporarily unavailable'"; exit 1; }
+    ;;
   telegram)
     preflight_telegram rediscover
     smoke_chat="$(envval NP_TELEGRAM_CHAT_ID)"
@@ -442,6 +482,6 @@ case "$cmd" in
     shift
     bcompose exec "$svc-api" /nodejs/bin/node dist/ops.js "$@"
     ;;
-  -h | --help | "") sed -n '2,13p' "$0" ;;
+  -h | --help | "") sed -n '2,14p' "$0" ;;
   *) die "unknown command '$cmd' (beta.sh --help)" ;;
 esac
