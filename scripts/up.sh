@@ -132,6 +132,8 @@ compose() {
 
 # ---- registry: seed, then build from source what the seed lacks ---------------------------------------------
 say "starting the package registry on $registry"
+# The Docker-free registry (scripts/registry.sh) listens on the same port: stop it, the Compose service takes over.
+"$deploy/scripts/registry.sh" stop >/dev/null 2>&1 || true
 compose up -d --wait registry >/dev/null
 # The exact tarballs the lockfiles were resolved against (old contract versions included); see registry-seed/.
 node "$deploy/scripts/lib/registry-seed.mjs" "$registry" "$deploy/registry-seed" "$secrets/registry_password" ||

@@ -13,3 +13,6 @@
 # Local secrets and generated state (scripts/seed.sh); never committed.
 .secrets/
 compose/env/local.env
+
+# Docker-free local package registry (scripts/registry.sh): Verdaccio, its storage and log.
+.registry/
