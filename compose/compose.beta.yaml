@@ -10,6 +10,22 @@
 # Monitoring (local only): Prometheus, Alertmanager (→ Telegram), Grafana and node-exporter, UIs on 127.0.0.1.
 #
 # Uses Compose's !reset / !override merge tags (Compose 2.24+; up.sh requires 2.30+).
+#
+# Uptime (docs/beta-launch.md "Uptime"): every long-running container restarts with Docker (`unless-stopped`) and has a
+# health check; `autoheal` restarts containers that stay unhealthy; memory limits keep one runaway service from starving
+# Postgres, which the kernel's OOM killer spares last (oom_score_adj); logs rotate (json-file 10 MB x 3).
+# Budget for Docker Desktop's 10 GB: reservations ~6 GB (21 Node processes x 192 MB, Postgres 1 GB, the rest small);
+# limits are caps, not reservations.
+
+x-logging: &logging
+  driver: json-file
+  options: { max-size: 10m, max-file: "3" }
+
+# Every NearPay Node process (21 containers): a leak stops at 1 GB (the container restarts) instead of eating the VM.
+x-node-limits: &node-limits
+  mem_limit: 1g
+  mem_reservation: 192m
+  pids_limit: 512
 
 networks:
   # cloudflared ↔ Traefik only. Not internal: cloudflared dials Cloudflare's edge from here. cloudflared's address is
@@ -53,6 +69,10 @@ services:
     environment:
       NP_EDGE: cloudflare # routes.yaml: per-IP limits on CF-Connecting-IP, no local-only hosts, no local certificate
       NP_TUNNEL_IP: ${NP_TUNNEL_IP:-10.233.251.2} # routes.yaml: the console answers the tunnel only
+    mem_limit: 512m
+    mem_reservation: 64m
+    cpu_shares: 1536 # the edge path keeps CPU when services are busy
+    oom_score_adj: -500
     volumes: !override
       - ./traefik/traefik.beta.yaml:/etc/traefik/traefik.yaml:ro
       - ./traefik/dynamic:/etc/traefik/dynamic:ro
@@ -71,16 +91,26 @@ services:
     user: "65532:65532"
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
-    command: [tunnel, --no-autoupdate, run, --token-file, /run/secrets/cloudflared_token]
+    # --metrics on loopback only: /ready answers 200 while at least one connection to Cloudflare's edge is up
+    command: [tunnel, --no-autoupdate, --metrics, "127.0.0.1:20241", run, --token-file, /run/secrets/cloudflared_token]
     secrets: [cloudflared_token]
+    healthcheck:
+      test: [CMD, /usr/local/bin/cloudflared, tunnel, --metrics, "127.0.0.1:20241", ready]
+      interval: 15s
+      timeout: 5s
+      start_period: 30s
+      start_interval: 3s # `up --wait` sees it healthy as soon as the tunnel connects
+      retries: 4 # 1 min without an edge connection = unhealthy → autoheal restarts it
+    mem_limit: 256m
+    mem_reservation: 32m
+    cpu_shares: 1536
+    oom_score_adj: -500
     # Only Traefik is reachable from here: a hostname pointed anywhere else in the dashboard finds nothing.
     networks:
       tunnel: { ipv4_address: "${NP_TUNNEL_IP:-10.233.251.2}" }
     depends_on:
       traefik: { condition: service_healthy }
-    logging:
-      driver: json-file
-      options: { max-size: 10m, max-file: "3" }
+    logging: *logging
 
   # Local-only containers of compose.local.yaml stay off (profiles nobody enables in beta).
   mailpit:
@@ -92,6 +122,59 @@ services:
   egress-proxy:
     command: !override [--listen-ip=0.0.0.0, --listen-port=4750, --timeout=10s]
     networks: !override [internal, egress]
+    mem_limit: 256m
+
+  static:
+    mem_limit: 256m
+  console:
+    mem_limit: 256m
+  # the package registry only serves image builds during `beta.sh up`
+  registry:
+    mem_limit: 512m
+    logging: *logging
+
+  # ------------------------------------------------------------------------------------------
+  # Data stores, sized for Docker Desktop's 10 GB. No memory limit on Postgres (it is what the rest depends on); the
+  # OOM killer picks any other container first. Autoheal leaves Postgres alone (a restart during crash recovery would
+  # only start it over): ContainerUnhealthy tells the owner instead.
+  # ------------------------------------------------------------------------------------------
+  postgres:
+    command:
+      - postgres
+      - -c
+      - max_connections=400
+      - -c
+      - shared_buffers=512MB
+      - -c
+      - effective_cache_size=1536MB
+      - -c
+      - work_mem=4MB
+      - -c
+      - maintenance_work_mem=128MB
+      - -c
+      - wal_buffers=16MB
+      - -c
+      - random_page_cost=1.1
+      - -c
+      # a leaked transaction cannot hold locks (and block every service) for longer than 10 minutes
+      - idle_in_transaction_session_timeout=600000
+    shm_size: 512mb
+    mem_reservation: 1g
+    cpu_shares: 2048
+    oom_score_adj: -800
+    labels: { money.nearpay.autoheal: "false" }
+
+  nats:
+    mem_limit: 1g
+    mem_reservation: 128m
+    cpu_shares: 1536
+    oom_score_adj: -600
+
+  valkey:
+    command: [valkey-server, --save, "60", "1000", --appendonly, "no", --maxmemory, 512mb, --maxmemory-policy, allkeys-lru]
+    mem_limit: 768m # maxmemory + overhead
+    mem_reservation: 128m
+    oom_score_adj: -400
 
   # ------------------------------------------------------------------------------------------
   # Services: beta-only wiring (everything else comes from compose.yaml with beta.env values)
@@ -103,6 +186,7 @@ services:
   # (NP_COOLOFF_SECONDS=0 from beta.env; owner decision 2026-11-11). The hardware-key wiring (AAGUID list,
   # attestation roots) stays for passkey mode.
   identity-api: &identity-beta
+    <<: *node-limits
     environment:
       NP_OPS_AUTH_MODE: ${NP_OPS_AUTH_MODE:-cloudflare_access}
       NP_CF_ACCESS_AUD: ${NP_CF_ACCESS_AUD:?set NP_CF_ACCESS_AUD (docs/beta-launch.md step 7; scripts/beta.sh asks for it)}
@@ -123,6 +207,7 @@ services:
   # NP_EMAIL_DAILY_RESERVE arrive with notify's beta/public branch (3b366f3); notify on main reads only NP_SMTP_URL and
   # would send unauthenticated (Resend refuses), so the beta needs that branch merged. Values: compose/env/beta.env.
   notify-api: &notify-beta
+    <<: *node-limits
     environment:
       NP_EMAIL_PROVIDER: smtp
       NP_SMTP_URL: smtps://smtp.resend.com:465
@@ -133,6 +218,58 @@ services:
       NP_EMAIL_DAILY_RESERVE: ${NP_EMAIL_DAILY_RESERVE:-15}
     secrets: [smtp_password]
   notify-worker: *notify-beta
+
+  payments-api: *node-limits
+  payments-worker: *node-limits
+  rails-api: *node-limits
+  rails-tracker: *node-limits
+  rails-feeds: *node-limits
+  agentpay-api: *node-limits
+  agentpay-batcher: *node-limits
+  compliance-api: *node-limits
+  compliance-worker: *node-limits
+  webhooks-api: *node-limits
+  webhooks-ingest: *node-limits
+  webhooks-dispatcher: *node-limits
+  sandbox-api: *node-limits
+  sentinel-api: *node-limits
+  sentinel-auditor: *node-limits
+  billing-api: *node-limits
+  billing-worker: *node-limits
+
+  # ------------------------------------------------------------------------------------------
+  # Autoheal: restarts containers of this project that stay unhealthy (Docker never does), with backoff and a global
+  # rate limit; holds when many are unhealthy at once (an overloaded machine). Same distroless Node image the services
+  # are built on (no new registry or package), script mounted read-only. It needs the Docker API: the socket is root's
+  # on Docker Desktop, so it runs as uid 0 without any capability, on a read-only root file system, on the internal
+  # network only (Prometheus scrapes its metrics; no internet). Metrics → rules/uptime.yml → Telegram.
+  # ------------------------------------------------------------------------------------------
+  autoheal:
+    image: gcr.io/distroless/nodejs22-debian12:nonroot
+    restart: unless-stopped
+    user: "0:0"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    entrypoint: [/nodejs/bin/node]
+    command: [/autoheal/autoheal.mjs]
+    environment:
+      NP_AUTOHEAL_PORT: "9464"
+    volumes:
+      - ./autoheal:/autoheal:ro
+      # ":ro" keeps the socket file itself read-only; the API is still the full API (restart is what autoheal needs)
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks: [internal]
+    healthcheck:
+      test: [CMD, /nodejs/bin/node, -e, "fetch('http://127.0.0.1:9464/healthz').then((r) => process.exit(r.ok ? 0 : 1), () => process.exit(1))"]
+      interval: 30s
+      timeout: 10s
+      start_period: 20s
+      start_interval: 3s
+      retries: 3
+    mem_limit: 128m
+    pids_limit: 64
+    logging: *logging
 
   # ------------------------------------------------------------------------------------------
   # Monitoring (free, local): UIs on 127.0.0.1 only
@@ -151,6 +288,8 @@ services:
       - --storage.tsdb.retention.size=2GB
       - --web.listen-address=0.0.0.0:9090
       - --web.external-url=http://127.0.0.1:${NP_PROMETHEUS_PORT:-9090}
+    mem_limit: 1g
+    mem_reservation: 256m
     volumes:
       - ./monitoring/prometheus:/etc/prometheus:ro
       - prometheus-data:/prometheus
@@ -161,9 +300,7 @@ services:
       interval: 10s
       timeout: 5s
       retries: 12
-    logging:
-      driver: json-file
-      options: { max-size: 10m, max-file: "3" }
+    logging: *logging
 
   alertmanager:
     image: prom/alertmanager:v0.31.0
@@ -178,6 +315,7 @@ services:
       - --web.listen-address=0.0.0.0:9093
       - --web.external-url=http://127.0.0.1:${NP_ALERTMANAGER_PORT:-9093}
       - --cluster.listen-address= # single instance: no gossip port
+    mem_limit: 256m
     configs:
       - { source: alertmanager_config, target: /etc/alertmanager/alertmanager.yml }
     secrets: [telegram_bot_token]
@@ -189,9 +327,7 @@ services:
       interval: 10s
       timeout: 5s
       retries: 12
-    logging:
-      driver: json-file
-      options: { max-size: 10m, max-file: "3" }
+    logging: *logging
 
   grafana:
     image: grafana/grafana:12.4.0
@@ -210,6 +346,14 @@ services:
       GF_NEWS_NEWS_FEED_ENABLED: "false"
       GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /etc/grafana/dashboards/nearpay-beta.json
     secrets: [grafana_admin_password]
+    healthcheck:
+      test: [CMD-SHELL, "wget -q -O /dev/null http://127.0.0.1:3000/api/health || curl -fsS -o /dev/null http://127.0.0.1:3000/api/health"]
+      interval: 30s
+      timeout: 5s
+      start_period: 60s
+      start_interval: 3s
+      retries: 5
+    mem_limit: 512m
     volumes:
       - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
       - ./monitoring/grafana/dashboards:/etc/grafana/dashboards:ro
@@ -218,9 +362,7 @@ services:
     networks: [monitoring]
     depends_on:
       prometheus: { condition: service_healthy }
-    logging:
-      driver: json-file
-      options: { max-size: 10m, max-file: "3" }
+    logging: *logging
 
   # Docker Desktop's Linux VM: CPU, memory and the free space of Docker's data disk (every named volume lives there;
   # an empty one is mounted at /docker-disk). No host mounts, so it works the same on Docker Desktop and Linux.
@@ -236,6 +378,12 @@ services:
       - '--collector.filesystem.fs-types-exclude=^(proc|sysfs|cgroup2?|tmpfs|devtmpfs|overlay|mqueue|nsfs|squashfs|shm)$$'
     volumes: [docker-disk-probe:/docker-disk:ro]
     networks: [internal]
-    logging:
-      driver: json-file
-      options: { max-size: 10m, max-file: "3" }
+    healthcheck:
+      test: [CMD, wget, -q, -O, /dev/null, http://127.0.0.1:9100/]
+      interval: 30s
+      timeout: 5s
+      start_period: 15s
+      start_interval: 3s
+      retries: 5
+    mem_limit: 128m
+    logging: *logging

@@ -7,6 +7,10 @@
 x-local-image: &local-image
   pull_policy: never
 
+x-logging: &logging # same rotation as compose.yaml: logs can never fill the disk
+  driver: json-file
+  options: { max-size: 10m, max-file: "3" }
+
 networks:
   # The merchant demo and the egress proxy only: webhook deliveries may reach exactly one
   # private address (the demo, webhooks LLD L-WH-02); everything else private stays blocked.
@@ -45,6 +49,7 @@ services:
       interval: 3s
       timeout: 3s
       retries: 40
+    logging: *logging
 
   mailpit:
     image: axllent/mailpit:v1.27.11
@@ -61,6 +66,7 @@ services:
       interval: 5s
       timeout: 3s
       retries: 12
+    logging: *logging
 
   egress-proxy:
     command:
@@ -93,6 +99,7 @@ services:
     depends_on:
       traefik: { condition: service_healthy }
       payments-api: { condition: service_healthy, required: false }
+    logging: *logging
 
   # ---- NearPay services: images come from scripts/up.sh, never from a registry ----------------
   console: *local-image

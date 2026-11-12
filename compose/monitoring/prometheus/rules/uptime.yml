@@ -1,0 +1,43 @@
+# Uptime alerts (→ Alertmanager → Telegram): the in-stack autoheal (compose/autoheal/autoheal.mjs, scrape job
+# `autoheal`). Kept apart from nearpay.yml. What the stack cannot see from inside (Docker Desktop down, the Mac offline,
+# the tunnel) is covered by the host watchdog (scripts/lib/watchdog.mjs, Telegram directly) and UptimeRobot.
+groups:
+  - name: nearpay-uptime
+    rules:
+      # autoheal restarted a container that stayed unhealthy (liveness check failing for ~3 min)
+      - alert: ContainerAutoHealed
+        expr: sum by (container) (increase(nearpay_autoheal_restarts_total[10m])) > 0
+        labels: { severity: warning }
+        annotations:
+          summary: "autoheal restarted {{ $labels.container }}"
+          description: "Its health check kept failing, so autoheal restarted it. If this repeats, the container has a real problem."
+          runbook: "scripts/beta.sh logs {{ $labels.container }}; scripts/beta.sh status"
+
+      # still unhealthy: autoheal's backoff (2, 4, 8, 16, 30 min) or the postgres opt-out
+      - alert: ContainerUnhealthy
+        expr: max by (container) (nearpay_autoheal_unhealthy) == 1
+        for: 10m
+        labels: { severity: critical }
+        annotations:
+          summary: "{{ $labels.container }} has been unhealthy for 10 minutes"
+          description: "Restarting did not fix it (or it is excluded from autoheal, like postgres)."
+          runbook: "scripts/beta.sh logs {{ $labels.container }}; docker restart {{ $labels.container }}"
+
+      # many containers unhealthy at once = the machine is overloaded (CPU, memory, disk): autoheal holds back
+      - alert: AutohealHeld
+        expr: max(nearpay_autoheal_held{reason="mass_unhealthy"}) == 1
+        for: 3m
+        labels: { severity: critical }
+        annotations:
+          summary: "Many containers are unhealthy at once: the Mac or Docker is overloaded"
+          description: "autoheal does not restart them (that would add load). Check Docker Desktop's CPU, memory and disk."
+          runbook: "scripts/beta.sh status; docker stats --no-stream; scripts/beta.sh doctor"
+
+      - alert: AutohealDown
+        expr: up{job="autoheal"} == 0 or (time() - max(nearpay_autoheal_last_loop_timestamp_seconds)) > 300
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: "autoheal is not running"
+          description: "Unhealthy containers are not restarted automatically (the host watchdog still restarts them after 5 minutes)."
+          runbook: "scripts/beta.sh logs autoheal; scripts/beta.sh up"
