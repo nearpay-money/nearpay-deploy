@@ -1,0 +1,18 @@
+# Starts NearPay's local package registry on the runner, so `pnpm install --frozen-lockfile` works in any NearPay
+# repository (their .npmrc routes @nearpay-money/* and @nearpay-internal/* to http://127.0.0.1:4873).
+#
+#   - uses: actions/setup-node@v4            # Node.js 22 or newer must be on the PATH first
+#   - uses: nearpay-money/nearpay-deploy/.github/actions/registry@main
+#   - run: pnpm install --frozen-lockfile
+#
+# It runs scripts/registry.sh of this repository at the ref the workflow names (Verdaccio from npm, no Docker),
+# seeded with the tarballs in registry-seed/. The registry keeps running until the job ends. A `docker build` step
+# that installs from it needs `--network host` to reach the runner's loopback address.
+name: NearPay local package registry
+description: Start the Docker-free local npm registry on 127.0.0.1:4873, seeded from nearpay-deploy/registry-seed
+runs:
+  using: composite
+  steps:
+    - name: Start the local package registry
+      shell: bash
+      run: bash "$GITHUB_ACTION_PATH/../../../scripts/registry.sh" start
