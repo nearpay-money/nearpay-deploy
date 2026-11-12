@@ -64,6 +64,16 @@ groups:
           description: "Sentinel reports the kill switch on; live quoting is refused until ops release it. Actor sentinel = corroborated integrity breaches across merchants (a security event: find the cause before releasing); otherwise an operator engaged it. See who and why with the first command."
           runbook: "scripts/beta.sh ops sentinel kill-switch; scripts/beta.sh ops sentinel integrity-breaches; release: Console (ops.nearpay.money) > Kill switch > Request release, wait 5 min, Approve release (new Access login, reason of 20+ characters); then scripts/beta.sh routing (docs/beta-launch.md 'Releasing the kill switch')"
 
+      # sentinel: nearpay_sentinel_kill_switch_auto_released_total{reason_class} — sentinel switched payments back on by
+      # itself after an automatic stop that no longer counts as platform evidence (owner decision 2026-11-13, ADR-0028).
+      - alert: KillSwitchAutoReleased
+        expr: sum by (reason_class) (increase(nearpay_sentinel_kill_switch_auto_released_total[10m])) > 0
+        labels: { severity: warning }
+        annotations:
+          summary: "Payments were paused by an automatic check that turned out to be a false alarm. They have been switched back on automatically."
+          description: "Sentinel released its own automatic stop ({{ $labels.reason_class }}). Nothing to do; payments route again. If this repeats, sentinel stops auto-releasing after 3 re-engagements in an hour and KillSwitchEngaged keeps firing."
+          runbook: "scripts/beta.sh routing (should say ok); history: scripts/beta.sh ops sentinel kill-switch"
+
       # sentinel: nearpay_sentinel_integrity_refusals_total{livemode,evidence,rule,address} — security refusals of deposit
       # instructions. address="genuine" + evidence="pipeline": a quote for a deposit address NearPay issued disagrees with
       # the provider's signature, NearPay's referral/treasury or identity's registry (ADR-0028). Sentinel refused that
