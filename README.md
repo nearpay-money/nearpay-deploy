@@ -1,6 +1,11 @@
 # nearpay-deploy
 
-> Desired runtime state. v1: the Docker Compose stack (profiles local/server/observability), Postgres init, Traefik config, env templates, deploy script and SOPS-encrypted secrets. Post-v1: Argo CD applications, Helm chart, platform components, per-environment overlays.
+How NearPay runs: the Docker Compose stack (local, server and observability profiles), Postgres init, Traefik config, env templates, the scripts that start it (`scripts/up.sh` locally, `scripts/beta.sh` for the live beta) and the local package registry every repository installs from.
+
+Part of [NearPay](https://github.com/nearpay-money/nearpay) — start there for the live demo, the architecture diagram and the full "do X, see Y" walkthrough.
+
+- **Where it sits:** it builds an image from every service and web app repository and runs them together. `scripts/up.sh local` is step 2 of the entry repository's local walkthrough (Path E); `scripts/registry.sh` is what Path D uses to run one repository's tests without Docker.
+- **Status:** NearPay runs on NEAR mainnet as a closed beta (https://nearpay.money). That deployment is this repository's Compose stack started by `scripts/beta.sh up` behind a Cloudflare Tunnel, with Prometheus, Alertmanager and Grafana (`docs/beta-launch.md`).
 
 | | |
 |---|---|
@@ -13,7 +18,7 @@
 
 ## Documentation
 
-This repo stays surgical: design docs live in [`nearpay-brain`](../nearpay-brain/README.md), not here.
+Design docs live in [`nearpay-brain`](https://github.com/nearpay-money/nearpay-brain), not here.
 
 - `nearpay-brain/lld/platform.md` — **low-level design (dev-ready; implement from this)**
 - `nearpay-brain/lld/audits/platform.md` — audit findings already folded into the LLD
@@ -190,8 +195,11 @@ Prometheus (every process's `:9464`, Traefik, node-exporter), Grafana dashboard 
 
 ## Status
 
-Stage 1 step 1.1: local profile complete — platform containers start healthy, Postgres roles are isolated per service, Traefik routes every Stage-1 public path to its owning service through ForwardAuth, and services join automatically once built. The server and observability profiles arrive in Stage 5.
+- **Local stack** (`scripts/up.sh local`): the whole platform in test mode. Platform containers start healthy, Postgres roles are isolated per service, Traefik routes every public path to its owning service through ForwardAuth.
+- **Live beta** (`scripts/beta.sh up`, runbook `docs/beta-launch.md`): the same stack in live mode on NEAR mainnet at https://nearpay.money, behind a Cloudflare Tunnel, with Prometheus, Alertmanager (alerts to Telegram) and Grafana, automatic restart of unhealthy containers, and a routing check that proves live payments can be quoted (`scripts/beta.sh routing`).
+- **Local package registry** (`scripts/registry.sh`): runs on Linux and macOS with Node 22 only; CI proves both.
+- Not built: the Kubernetes path (Argo CD, Helm) described in the design docs.
 
 ## Built with
 
-Docker Compose, Traefik 3, PostgreSQL 17, NATS 2.10 (JetStream), Valkey 8, Smokescreen, nginx (unprivileged), Mailpit, Verdaccio, mkcert or OpenSSL, Node.js (key generation). Code and documentation are written with AI assistance (Claude) under human direction and review.
+Docker Compose, Traefik 3, PostgreSQL 17, NATS 2.10 (JetStream), Valkey 8, Smokescreen, nginx (unprivileged), Mailpit, Verdaccio, Prometheus, Alertmanager, Grafana, Cloudflare Tunnel (`cloudflared`), mkcert or OpenSSL, Node.js (key generation). Licence: Apache-2.0. Code and documentation are written with AI assistance (Claude) under human direction and review.
