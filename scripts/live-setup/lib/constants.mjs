@@ -43,5 +43,6 @@ export const FUNDING = Object.freeze({
 });
 
 export const EXPLORER_TX = "https://nearblocks.io/txns/";
-export const DEFAULT_RPC_URLS = Object.freeze(["https://rpc.mainnet.near.org", "https://free.rpc.fastnear.com"]);
+// FastNEAR first: rpc.mainnet.near.org is deprecated and limited to 30 requests/min (NEAR, Aug 2025); last resort only.
+export const DEFAULT_RPC_URLS = Object.freeze(["https://free.rpc.fastnear.com", "https://near.drpc.org", "https://rpc.mainnet.near.org"]);
 export const ROLES = Object.freeze(["treasury", "relayer", "merchant", "agent"]);

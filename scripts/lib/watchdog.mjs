@@ -7,6 +7,10 @@
 //   long-running container stopped      `docker start <container>` (never a one-shot like migrate-* or postgres-init)
 //   container unhealthy for 5 min       alert; restart it only when the autoheal container itself is not running
 //   public URLs fail with tunnel errors  restart cloudflared (530 / no answer while the internet works; every 10 min)
+//   alerting broken                     alert only (dead man's switch for Alertmanager → Telegram, audit DEPLOY-4):
+//                                       Prometheus not ready, Alertmanager not answering /api/v2/status, Prometheus
+//                                       not delivering to Alertmanager, rule evaluations failing, or Alertmanager's
+//                                       Telegram notifications failing (bad bot token, egress) — for 3 rounds
 //
 // It never recreates containers itself (`docker compose up` without beta.sh's environment would remount the static
 // sites from placeholders) and never touches data. `scripts/beta.sh down` leaves a marker that turns it off; while
@@ -32,6 +36,7 @@ export const OPTS = Object.freeze({
   unhealthyMs: 5 * 60_000,
   unhealthyRestartGapMs: 15 * 60_000,
   publicFailRuns: 2,
+  monitoringFailRuns: 3, // alerting broken this many rounds in a row → alert (Prometheus/Alertmanager restarts take < 1 min)
   tunnelRestartGapMs: 10 * 60_000,
   repeatMs: 6 * 60 * 60_000,
   keepActionsMs: 60 * 60_000,
@@ -41,7 +46,7 @@ export const LONG_RUNNING = new Set(["always", "unless-stopped", "on-failure"]);
 const STOPPED = new Set(["exited", "dead", "created"]);
 
 export function emptyState() {
-  return { lastRun: 0, lastSummary: "", dockerDown: 0, publicFail: 0, unhealthySince: {}, restarting: {}, actions: {}, alerts: {} };
+  return { lastRun: 0, lastSummary: "", dockerDown: 0, publicFail: 0, monitoringFail: 0, unhealthySince: {}, restarting: {}, actions: {}, alerts: {} };
 }
 
 /** Public URL result → "ok" | "origin" (the stack answered with an error) | "tunnel" (530 / no answer) */
@@ -63,10 +68,29 @@ function record(state, key, now, o) {
 }
 
 /**
+ * Alerting problems from monitoring facts { prometheus, alertmanager (booleans: answering), deliveryErrors (Prometheus →
+ * Alertmanager send errors in 15 min), alertmanagersDiscovered, ruleFailures (rule evaluation failures in 15 min),
+ * telegramFailures (Alertmanager's failed Telegram notifications in 15 min) } — null/undefined = unknown, not a problem.
+ */
+export function monitoringProblems(m) {
+  if (!m) return [];
+  const p = [];
+  if (m.prometheus === false) p.push("Prometheus is not ready (scripts/beta.sh logs prometheus)");
+  if (m.alertmanager === false) p.push("Alertmanager does not answer (scripts/beta.sh logs alertmanager)");
+  if (m.alertmanagersDiscovered === 0 || m.deliveryErrors > 0)
+    p.push("Prometheus cannot send alerts to Alertmanager (scripts/beta.sh logs prometheus | grep -i notif)");
+  if (m.ruleFailures > 0) p.push("alert rules fail to evaluate (Prometheus > Alerts / Rules; scripts/beta.sh logs prometheus)");
+  if (m.telegramFailures > 0)
+    p.push("Alertmanager's Telegram messages fail: bot token or chat, or api.telegram.org unreachable (scripts/beta.sh logs alertmanager; scripts/beta.sh telegram)");
+  return p;
+}
+
+/**
  * One round's decisions. facts:
  *   now, stopped (beta.sh down marker), busy (beta.sh up holds the lock), docker (boolean),
  *   containers [{ container, service, state, health, restartPolicy, oneoff }], expected [service] (from the last good
- *   `beta.sh up`; empty = unknown), internet (boolean), public [{ url, code, expect: "200" | "2xx3xx" }]
+ *   `beta.sh up`; empty = unknown), internet (boolean), public [{ url, code, expect: "200" | "2xx3xx" }],
+ *   monitoring (see monitoringProblems; absent = not checked)
  * Returns { actions, firing: { key: text }, summary, state } — state is a new object.
  */
 export function decide(facts, prev, o = OPTS) {
@@ -81,7 +105,7 @@ export function decide(facts, prev, o = OPTS) {
   };
 
   if (facts.stopped) {
-    Object.assign(state, { dockerDown: 0, publicFail: 0, unhealthySince: {}, restarting: {} });
+    Object.assign(state, { dockerDown: 0, publicFail: 0, monitoringFail: 0, unhealthySince: {}, restarting: {} });
     return done("idle: the beta was stopped with beta.sh down (beta.sh up starts it again)");
   }
   if (facts.busy) return done("waiting: beta.sh up is running");
@@ -183,6 +207,15 @@ export function decide(facts, prev, o = OPTS) {
     }
   }
 
+  // 5. alerting itself (dead man's switch): the watchdog tells Telegram directly when Alertmanager cannot
+  const mon = monitoringProblems(facts.monitoring);
+  state.monitoringFail = mon.length ? (state.monitoringFail ?? 0) + 1 : 0;
+  if (mon.length) {
+    parts.push(`alerting: ${mon.map((x) => x.replace(/ \(.*\)$/, "")).join("; ")}`);
+    if (state.monitoringFail >= o.monitoringFailRuns)
+      firing.monitoring_down = `Alerting is broken on the beta Mac, so Alertmanager alerts (kill switch, payments not routing, …) may not reach you: ${mon.join("; ")}. Until it is fixed, check scripts/beta.sh status and scripts/beta.sh routing yourself.`;
+  }
+
   const healthy = running.filter((c) => c.health === "healthy").length;
   const head = `${running.filter((c) => c.state === "running").length}/${running.length} running (${healthy} healthy)`;
   if (!parts.length) return done(`ok: ${head}, public URLs ok`);
@@ -221,6 +254,7 @@ const RESOLVED = {
   unhealthy: "no beta container is unhealthy",
   public_down: "the public URLs answer again",
   internet_down: "the beta Mac is back online",
+  monitoring_down: "alerting works again (Prometheus, Alertmanager, Telegram delivery)",
 };
 
 // ---- facts ----------------------------------------------------------------------------------------------------------
@@ -284,6 +318,39 @@ async function publicFacts(list) {
       return { ...p, code };
     }),
   );
+}
+
+async function httpJson(url, timeoutMs = 8_000) {
+  try {
+    const res = await fetch(url, { signal: AbortSignal.timeout(timeoutMs) });
+    if (!res.ok) return null;
+    return await res.json();
+  } catch {
+    return null;
+  }
+}
+
+/** One instant query → the first value as a number, or null (no data / Prometheus down). */
+async function promValue(base, q) {
+  const j = await httpJson(`${base}/api/v1/query?query=${encodeURIComponent(q)}`);
+  const v = j?.status === "success" ? j.data?.result?.[0]?.value?.[1] : undefined;
+  return v === undefined ? null : Number(v);
+}
+
+export const MONITORING_QUERIES = Object.freeze({
+  alertmanagersDiscovered: "max(prometheus_notifications_alertmanagers_discovered)",
+  deliveryErrors: "sum(increase(prometheus_notifications_errors_total[15m]))",
+  ruleFailures: "sum(increase(prometheus_rule_evaluation_failures_total[15m]))",
+  telegramFailures: 'sum(increase(alertmanager_notifications_failed_total{integration="telegram"}[15m]))',
+});
+
+/** Prometheus /-/ready, Alertmanager /api/v2/status, and the delivery counters (through Prometheus). */
+export async function monitoringFacts(promUrl, amUrl) {
+  const prometheus = (await httpCode(`${promUrl}/-/ready`, 8_000)) === 200;
+  const alertmanager = (await httpJson(`${amUrl}/api/v2/status`)) !== null;
+  const m = { prometheus, alertmanager };
+  if (prometheus) for (const [k, q] of Object.entries(MONITORING_QUERIES)) m[k] = await promValue(promUrl, q);
+  return m;
 }
 
 async function internetOk() {
@@ -381,6 +448,8 @@ export async function runOnce(env = process.env) {
     facts.expected = (env.NP_WD_EXPECTED && existsSync(env.NP_WD_EXPECTED) ? readFileSync(env.NP_WD_EXPECTED, "utf8") : "").split(/\s+/).filter(Boolean);
     facts.internet = await internetOk();
     if (facts.internet) facts.public = await publicFacts(PUBLIC);
+    if (facts.docker && env.NP_WD_PROMETHEUS_URL && env.NP_WD_ALERTMANAGER_URL)
+      facts.monitoring = await monitoringFacts(env.NP_WD_PROMETHEUS_URL, env.NP_WD_ALERTMANAGER_URL);
   }
   const d = decide(facts, prev);
   const paused = env.NP_WD_PAUSED === "1";
