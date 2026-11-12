@@ -81,6 +81,7 @@ readfile() { tr -d '[:space:]' <"$1"; }
 
 # ---- lock, exit hooks, notices --------------------------------------------------------------------------------------
 lock_held=0
+lock_blocked=0
 silence_id=""
 on_exit() {
   if [ -n "$silence_id" ]; then
@@ -89,6 +90,9 @@ on_exit() {
   if [ "$lock_held" = 1 ] && [ "$(cat "$lock_dir/pid" 2>/dev/null)" = "$$" ]; then rm -rf "$lock_dir"; fi
 }
 trap on_exit EXIT
+if [ "$(id -u)" = 0 ] && [ "${NP_BETA_ALLOW_ROOT:-0}" != 1 ]; then
+  echo "beta.sh: do not run this with sudo; it creates files your user cannot remove. Run it as yourself." >&2; exit 1
+fi
 
 lock_try() { # succeeds when this process now holds the lock (stale locks of dead processes are taken over)
   [ "${NP_BETA_LOCK_HELD:-0}" = 1 ] && return 0 # a parent (watchdog/autostart) holds it for us
@@ -99,14 +103,22 @@ lock_try() { # succeeds when this process now holds the lock (stale locks of dea
   if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then return 1; fi
   # no pid yet: another process is between mkdir and writing it, unless the directory is older than a minute
   if [ -z "$pid" ] && [ -z "$(find "$lock_dir" -maxdepth 0 -mmin +1 2>/dev/null)" ]; then return 1; fi
-  rm -rf "$lock_dir"
+  # a stale lock this user cannot read or remove (e.g. left by a command run with sudo) would block every run forever
+  if [ -d "$lock_dir" ] && { [ ! -r "$lock_dir" ] || [ ! -w "$lock_dir" ] || ! rm -rf "$lock_dir" 2>/dev/null; }; then
+    lock_blocked=1; return 1
+  fi
+  rm -rf "$lock_dir" 2>/dev/null
   if mkdir "$lock_dir" 2>/dev/null; then echo $$ >"$lock_dir/pid"; lock_held=1; return 0; fi
   return 1
 }
 
 lock_wait() { # seconds
   local waited=0
+  lock_blocked=0
   until lock_try; do
+    if [ "$lock_blocked" = 1 ]; then
+      die "a leftover lock that this user cannot remove is blocking the beta ($lock_dir, probably from a command run with sudo). Remove it once: sudo rm -rf \"$lock_dir\" — then run the command again"
+    fi
     [ "$waited" -ge "$1" ] && return 1
     [ "$waited" = 0 ] && say "  …    waiting for another beta.sh up / watchdog round to finish (pid $(cat "$lock_dir/pid" 2>/dev/null))"
     sleep 5
