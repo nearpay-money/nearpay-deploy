@@ -411,7 +411,8 @@ export function summaryLines(cs, state, now, opts = {}) {
     const bad = running.filter((c) => c.state !== "running" || c.health === "unhealthy");
     const starting = running.filter((c) => c.health === "starting").map((c) => c.service);
     const healthy = up.filter((c) => c.health === "healthy").length;
-    const desc = `${up.length}/${running.length} running, ${healthy} healthy, ${up.length - healthy - starting.length} without a health check`;
+    const none = up.filter((c) => !c.health).length;
+    const desc = `${up.length}/${running.length} running, ${healthy} healthy${none ? `, ${none} without a health check` : ""}`;
     if (bad.length) lines.push(["FAIL", `containers: ${desc}; problems: ${bad.map((c) => `${c.service} (${c.state === "running" ? c.health : c.state})`).join(", ")}`]);
     else lines.push([starting.length ? "warn" : "ok", `containers: ${desc}${starting.length ? `; starting: ${starting.join(", ")}` : ""}`]);
   }
@@ -423,7 +424,7 @@ export function summaryLines(cs, state, now, opts = {}) {
   const ah = running.find((c) => c.service === "autoheal");
   if (!ah) lines.push(["warn", "autoheal: not running (scripts/beta.sh up starts it)"]);
   else lines.push([ah.state === "running" && ah.health !== "unhealthy" ? "ok" : "FAIL", `autoheal: ${ah.state}${ah.health ? ` (${ah.health})` : ""}`]);
-  if (!state?.lastRun) lines.push([opts.installed ? "warn" : "warn", "watchdog: has not run yet"]);
+  if (!state?.lastRun) lines.push(["warn", `watchdog: has not run yet${opts.installed ? "" : " (scripts/beta.sh install-autostart)"}`]);
   else {
     const age = Math.round((now - state.lastRun) / 1000);
     const ago = age < 120 ? `${age} s ago` : `${Math.round(age / 60)} min ago`;

@@ -3,7 +3,12 @@
 #
 #   scripts/beta.sh up [--no-pull]   preflight → sibling mains → build → start (scripts/up.sh beta) → URLs → smoke test
 #   scripts/beta.sh down             stop the beta (data is kept) and let the Mac sleep again
-#   scripts/beta.sh status           containers, firing alerts, keep-awake, memory per container
+#   scripts/beta.sh status           uptime summary (containers, tunnel, keep-awake, autostart, watchdog, kill switch,
+#                                    live routing), firing alerts, memory per container
+#   scripts/beta.sh doctor           is this Mac set up to keep the beta running on its own? each problem with its fix
+#   scripts/beta.sh install-autostart   launchd: start the beta at login, keep the Mac awake, watchdog every minute
+#   scripts/beta.sh uninstall-autostart remove those three launchd jobs
+#   scripts/beta.sh watchdog [pause [min]|resume|log]  one watchdog round (launchd runs it), pause/resume healing, its log
 #   scripts/beta.sh logs <service>   follow one container's logs (e.g. payments-api, cloudflared, traefik)
 #   scripts/beta.sh smoke            public URLs, Cloudflare Access on ops, Prometheus targets, live routing, egress hosts, Telegram
 #   scripts/beta.sh routing          can live payments route? blocking reasons with a fix each (rails routing health)
@@ -24,6 +29,16 @@ local_env="$compose_dir/env/local.env"
 beta_env="$compose_dir/env/beta.env"
 owner_env="$beta/beta.env" # owner-specific values this script discovers (git-ignored)
 project=nearpay-beta
+# uptime (docs/beta-launch.md "Uptime"): launchd jobs, the watchdog's state and the marker `down` leaves
+stopped_marker="$beta/stopped"      # present after `beta.sh down`: autostart, keep-awake and the watchdog stand still
+pause_file="$beta/watchdog.paused"  # `beta.sh watchdog pause`: epoch seconds until which the watchdog only reports
+wd_state="$beta/watchdog-state.json"
+expected_file="$beta/expected-services" # long-running services of the last successful `up` (watchdog: what is missing)
+lock_dir="$beta/run.lock"           # one `up` / autostart / watchdog round at a time
+log_dir="${NP_BETA_LOG_DIR:-$HOME/Library/Logs/NearPay}"
+agents_dir="$HOME/Library/LaunchAgents"
+AGENTS=(money.nearpay.beta.autostart money.nearpay.beta.keepawake money.nearpay.beta.watchdog)
+keepawake_label=money.nearpay.beta.keepawake
 
 SERVICES=(identity payments rails agentpay compliance webhooks notify sandbox sentinel billing)
 # every repository the beta builds from (services, console image, web apps, the packages up.sh publishes)
@@ -63,6 +78,83 @@ bcompose() { # the beta project, same files as scripts/up.sh beta
 }
 
 readfile() { tr -d '[:space:]' <"$1"; }
+
+# ---- lock, exit hooks, notices --------------------------------------------------------------------------------------
+lock_held=0
+silence_id=""
+on_exit() {
+  if [ -n "$silence_id" ]; then
+    node "$deploy/scripts/lib/alertmanager-silence.mjs" expire "http://127.0.0.1:$(envval NP_ALERTMANAGER_PORT)" "$silence_id" >/dev/null 2>&1 || true
+  fi
+  if [ "$lock_held" = 1 ] && [ "$(cat "$lock_dir/pid" 2>/dev/null)" = "$$" ]; then rm -rf "$lock_dir"; fi
+}
+trap on_exit EXIT
+
+lock_try() { # succeeds when this process now holds the lock (stale locks of dead processes are taken over)
+  [ "${NP_BETA_LOCK_HELD:-0}" = 1 ] && return 0 # a parent (watchdog/autostart) holds it for us
+  mkdir -p "$beta"
+  if mkdir "$lock_dir" 2>/dev/null; then echo $$ >"$lock_dir/pid"; lock_held=1; return 0; fi
+  local pid
+  pid="$(cat "$lock_dir/pid" 2>/dev/null || true)"
+  if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then return 1; fi
+  # no pid yet: another process is between mkdir and writing it, unless the directory is older than a minute
+  if [ -z "$pid" ] && [ -z "$(find "$lock_dir" -maxdepth 0 -mmin +1 2>/dev/null)" ]; then return 1; fi
+  rm -rf "$lock_dir"
+  if mkdir "$lock_dir" 2>/dev/null; then echo $$ >"$lock_dir/pid"; lock_held=1; return 0; fi
+  return 1
+}
+
+lock_wait() { # seconds
+  local waited=0
+  until lock_try; do
+    [ "$waited" -ge "$1" ] && return 1
+    [ "$waited" = 0 ] && say "  …    waiting for another beta.sh up / watchdog round to finish (pid $(cat "$lock_dir/pid" 2>/dev/null))"
+    sleep 5
+    waited=$((waited + 5))
+  done
+}
+
+tg_notify() { # best effort: a Telegram message to the alert chat (no output, never fails)
+  local chat
+  chat="$(envval NP_TELEGRAM_CHAT_ID)"
+  [ -n "$chat" ] && [ -s "$beta/telegram_bot_token" ] || return 0
+  local text="${1//\"/\'}"
+  telegram sendMessage "data = \"chat_id=$chat\"" "data-urlencode = \"text=NearPay beta ($(hostname -s)): ${text//\\/}\"" >/dev/null 2>&1 || true
+}
+
+# HTTP status of a URL with retries and backoff (3 s, 6 s, …) while it is not 2xx/3xx; "" = no answer
+http_code() {
+  local url="$1" tries="${2:-3}" i code=""
+  for i in $(seq 1 "$tries"); do
+    code="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 10 "$url" 2>/dev/null || true)"
+    case "$code" in 2* | 3*) break ;; esac
+    [ "$i" -lt "$tries" ] && sleep $((i * 3))
+  done
+  [ "$code" = 000 ] && code=""
+  printf '%s' "$code"
+}
+
+project_containers() { docker ps -aq --filter "label=com.docker.compose.project=$project" 2>/dev/null; }
+
+record_expected() { # long-running services of the stack as it is now (after a successful up)
+  local ids
+  ids="$(project_containers)"
+  [ -n "$ids" ] || return 0
+  # shellcheck disable=SC2086 # one argument per container id
+  docker inspect --format '{{index .Config.Labels "com.docker.compose.service"}} {{.HostConfig.RestartPolicy.Name}}' $ids |
+    awk '$2 != "no" && $2 != "" {print $1}' | LC_ALL=C sort -u >"$expected_file"
+}
+
+stack_missing() { # prints the expected services without a container (all of them = "no containers")
+  local present
+  present="$(docker ps -a --filter "label=com.docker.compose.project=$project" --format '{{.Label "com.docker.compose.service"}}' 2>/dev/null | LC_ALL=C sort -u)"
+  if [ -z "$present" ]; then echo "(no beta containers)"; return; fi
+  [ -s "$expected_file" ] || return 0
+  printf '%s\n' "$present" | LC_ALL=C comm -23 "$expected_file" - | tr '\n' ' '
+}
+
+is_macos() { [ "$(uname -s)" = Darwin ]; }
+agent_loaded() { is_macos && launchctl print "gui/$(id -u)/$1" >/dev/null 2>&1; }
 
 print_hostnames() { # the tunnel's public hostnames, as entered in the Cloudflare dashboard
   local h sub
@@ -104,7 +196,9 @@ preflight_machine() {
   if [ "$mem" -lt 8000000000 ]; then
     die "Docker Desktop has ${gib} GiB of memory; the beta needs 8 GB. Docker Desktop > Settings > Resources > Memory: 8 GB or more, Apply & restart, then run this again"
   fi
-  ok "Docker Desktop memory: ${gib} GiB"
+  # The beta's memory reservations add up to ~6 GB (compose.beta.yaml); 10 GB leaves room for peaks and builds.
+  if [ "$mem" -lt 9500000000 ]; then warn "Docker Desktop memory: ${gib} GiB (10 GB recommended: Settings > Resources > Memory)"
+  else ok "Docker Desktop memory: ${gib} GiB"; fi
   local free_gb
   free_gb=$(($(df -Pk "$deploy" | awk 'NR==2 {print $4}') / 1048576))
   if [ "$free_gb" -lt 20 ]; then die "only ${free_gb} GB free on this disk; free at least 20 GB (images, Postgres, Prometheus)"; fi
@@ -289,7 +383,13 @@ preflight_config() {
 }
 
 keep_awake() {
-  [ "$(uname -s)" = Darwin ] || return 0
+  is_macos || return 0
+  rm -f "$stopped_marker"
+  if agent_loaded "$keepawake_label"; then
+    launchctl kickstart "gui/$(id -u)/$keepawake_label" >/dev/null 2>&1 || true
+    ok "keep-awake on (caffeinate owned by launchd, $keepawake_label); keep the Mac plugged in with the lid open"
+    return
+  fi
   local pidf="$beta/caffeinate.pid"
   if [ -f "$pidf" ] && kill -0 "$(cat "$pidf")" 2>/dev/null; then ok "keep-awake already on (caffeinate pid $(cat "$pidf"))"; return; fi
   # -i idle sleep, -m disk sleep, -s system sleep (on power adapter). Closing the lid still sleeps a MacBook
@@ -297,6 +397,155 @@ keep_awake() {
   nohup caffeinate -ims >/dev/null 2>&1 &
   echo $! >"$pidf"
   ok "keep-awake on (caffeinate pid $!); keep the Mac plugged in with the lid open"
+  warn "this caffeinate ends with a reboot or logout: run 'scripts/beta.sh install-autostart' so launchd keeps the Mac awake"
+}
+
+# ---- uptime: watchdog, launchd, status summary ----------------------------------------------------------------------
+wd_paused() { # succeeds while `beta.sh watchdog pause` is in effect (an expired pause is removed)
+  [ -f "$pause_file" ] || return 1
+  if [ "$(date +%s)" -lt "$(cat "$pause_file" 2>/dev/null || echo 0)" ]; then return 0; fi
+  rm -f "$pause_file"
+  return 1
+}
+
+wd_env() { # the environment scripts/lib/watchdog.mjs reads
+  local installed=0
+  [ -f "$agents_dir/money.nearpay.beta.watchdog.plist" ] && installed=1
+  export NP_WD_PROJECT="$project" NP_WD_STATE="$wd_state" NP_WD_LOG="$log_dir/watchdog.log" NP_WD_UP_LOG="$log_dir/watchdog-up.log" \
+    NP_WD_EXPECTED="$expected_file" NP_WD_BETA_SH="$deploy/scripts/beta.sh" NP_WD_INSTALLED="$installed" \
+    NP_WD_HEALTHCHECKS_URL_FILE="$beta/healthchecks_url" NP_TELEGRAM_TOKEN_FILE="$beta/telegram_bot_token" \
+    NP_TELEGRAM_CHAT_ID NP_WD_HOST
+  NP_TELEGRAM_CHAT_ID="$(envval NP_TELEGRAM_CHAT_ID)"
+  NP_WD_HOST="$(hostname -s)"
+  NP_WD_STOPPED=0; [ -e "$stopped_marker" ] && NP_WD_STOPPED=1
+  NP_WD_PAUSED=0; wd_paused && NP_WD_PAUSED=1
+  export NP_WD_STOPPED NP_WD_PAUSED
+}
+
+watchdog_round() { # one round; the lock keeps it out of a running `beta.sh up`
+  mkdir -p "$log_dir" "$beta"
+  wd_env
+  NP_WD_BUSY=0
+  lock_try || NP_WD_BUSY=1
+  export NP_WD_BUSY
+  node "$deploy/scripts/lib/watchdog.mjs" run || true
+}
+
+wait_docker() { # seconds; opens Docker Desktop on macOS while waiting
+  local waited=0
+  until docker info >/dev/null 2>&1; do
+    if is_macos && [ $((waited % 120)) = 0 ]; then open -ga Docker 2>/dev/null || true; fi
+    [ "$waited" -ge "$1" ] && return 1
+    sleep 10
+    waited=$((waited + 10))
+  done
+}
+
+autostart() { # launchd at login (money.nearpay.beta.autostart): Docker Desktop, then the beta if anything is missing
+  local was_down=0 missing rc=0
+  say "$(date -u '+%Y-%m-%d %H:%M:%S UTC') autostart (login)"
+  if [ -e "$stopped_marker" ]; then say "  the beta was stopped with beta.sh down: nothing to start"; return 0; fi
+  docker info >/dev/null 2>&1 || was_down=1
+  if ! wait_docker 900; then
+    tg_notify "after login, Docker Desktop did not start within 15 minutes, so the beta is down. Open Docker Desktop on the Mac."
+    die "Docker Desktop did not start within 15 minutes"
+  fi
+  # Docker restarts the beta's containers itself (restart: unless-stopped); give it a minute before judging
+  [ "$was_down" = 1 ] && sleep 60
+  lock_wait 600 || die "another beta.sh up is still running after 10 minutes"
+  missing="$(stack_missing)"
+  if [ -z "$missing" ]; then
+    say "  every beta container exists (Docker restarted them); the watchdog starts any that are stopped"
+    tg_notify "the Mac signed in again (restart or login). Docker restarted the beta; scripts/beta.sh status shows the details."
+    return 0
+  fi
+  say "  missing: $missing → scripts/beta.sh up --no-pull"
+  NP_BETA_LOCK_HELD=1 "$deploy/scripts/beta.sh" up --no-pull || rc=$?
+  if [ "$rc" != 0 ]; then
+    tg_notify "after login, scripts/beta.sh up failed (exit $rc). Log: ~/Library/Logs/NearPay/autostart.log. The watchdog keeps retrying every 15 minutes."
+    return "$rc"
+  fi
+}
+
+launchd_path() { # PATH for the launchd jobs: where node, docker, pnpm and git are now, plus the usual places
+  local d out="" c
+  for c in node docker pnpm git curl; do
+    d="$(dirname "$(command -v "$c" 2>/dev/null || echo /usr/bin/true)")"
+    case ":$out:" in *":$d:"*) ;; *) out="${out:+$out:}$d" ;; esac
+  done
+  for d in /opt/homebrew/bin /usr/local/bin /Applications/Docker.app/Contents/Resources/bin /usr/bin /bin /usr/sbin /sbin; do
+    case ":$out:" in *":$d:"*) ;; *) out="${out:+$out:}$d" ;; esac
+  done
+  printf '%s' "$out"
+}
+
+install_autostart() {
+  is_macos || die "install-autostart is for the owner's Mac (launchd)"
+  step "launchd jobs (start at login, keep awake, watchdog every minute)"
+  local uid f label
+  uid="$(id -u)"
+  mkdir -p "$log_dir"
+  while IFS= read -r f; do
+    label="$(basename "$f" .plist)"
+    launchctl bootout "gui/$uid/$label" >/dev/null 2>&1 || true
+    plutil -lint "$f" >/dev/null || die "$f is not a valid property list"
+    launchctl enable "gui/$uid/$label" 2>/dev/null || true
+    launchctl bootstrap "gui/$uid" "$f" || die "launchctl bootstrap $f failed"
+    ok "$label → $f"
+  done < <(node "$deploy/scripts/lib/launchd.mjs" write "$agents_dir" "$deploy" "$log_dir" "$(launchd_path)")
+  say "  logs: $log_dir (watchdog.log, autostart.log)"
+  say "  Next: scripts/beta.sh doctor (sleep, power, Docker Desktop and login settings)"
+}
+
+uninstall_autostart() {
+  is_macos || die "uninstall-autostart is for the owner's Mac (launchd)"
+  local uid label
+  uid="$(id -u)"
+  for label in "${AGENTS[@]}"; do
+    launchctl bootout "gui/$uid/$label" >/dev/null 2>&1 || true
+    rm -f "$agents_dir/$label.plist"
+    ok "removed $label"
+  done
+  say "  The beta keeps running; it no longer starts at login, keeps the Mac awake or heals itself from the host."
+}
+
+prom_value() { # instant query → first value, or "none"
+  # shellcheck disable=SC2016 # JavaScript
+  curl -sS --max-time 5 --get --data-urlencode "query=$1" "http://127.0.0.1:$(envval NP_PROMETHEUS_PORT)/api/v1/query" 2>/dev/null |
+    node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const r=JSON.parse(s).data.result;process.stdout.write(r.length?String(r[0].value[1]):"none")}catch{process.stdout.write("none")}})' ||
+    printf none
+}
+
+uptime_summary() {
+  step "Uptime"
+  local k t ks code
+  if [ -e "$stopped_marker" ]; then warn "the beta was stopped with beta.sh down (autostart, keep-awake and watchdog stand still; beta.sh up starts it)"; fi
+  if docker info >/dev/null 2>&1; then ok "Docker Desktop answers"; else bad "Docker Desktop is not answering (open it; the watchdog does too)"; fi
+  wd_env
+  while IFS=$'\t' read -r k t; do
+    case "$k" in ok) ok "$t" ;; warn) warn "$t" ;; *) bad "$t" ;; esac
+  done < <(node "$deploy/scripts/lib/watchdog.mjs" summary 2>/dev/null)
+  wd_paused && warn "watchdog healing paused until $(date -r "$(cat "$pause_file")" '+%H:%M' 2>/dev/null || cat "$pause_file") (scripts/beta.sh watchdog resume)"
+  code="$(http_code https://api.nearpay.money/healthz 1)"
+  if [ "$code" = 200 ]; then ok "public: https://api.nearpay.money/healthz → 200"; else bad "public: https://api.nearpay.money/healthz → ${code:-no answer}"; fi
+  if ! is_macos; then
+    warn "keep-awake and autostart: macOS only"
+  else
+    if agent_loaded "$keepawake_label" && launchctl print "gui/$(id -u)/$keepawake_label" 2>/dev/null | grep -q 'state = running'; then ok "keep-awake: on (launchd owns caffeinate)"
+    elif [ -f "$beta/caffeinate.pid" ] && kill -0 "$(cat "$beta/caffeinate.pid")" 2>/dev/null; then warn "keep-awake: on, but started from a terminal (ends at logout/reboot): scripts/beta.sh install-autostart"
+    else bad "keep-awake: OFF (scripts/beta.sh install-autostart, or beta.sh up)"; fi
+    local missing_agents=""
+    for k in "${AGENTS[@]}"; do agent_loaded "$k" || missing_agents="$missing_agents ${k##*.}"; done
+    if [ -z "$missing_agents" ]; then ok "autostart: installed (start at login, keep-awake, watchdog every minute)"
+    else bad "autostart: not installed or not loaded:$missing_agents (scripts/beta.sh install-autostart)"; fi
+  fi
+  ks="$(prom_value 'max(nearpay_sentinel_kill_switch_engaged)')"
+  case "$ks" in
+    0) ok "kill switch: off" ;;
+    1) bad "kill switch: ENGAGED (live payments stopped on purpose; console > Kill switch)" ;;
+    *) warn "kill switch: unknown (Prometheus has no value)" ;;
+  esac
+  routing_check 1 || true
 }
 
 # ---- live routing (rails routing health via Prometheus) -------------------------------------------------------------
@@ -333,7 +582,7 @@ routing_check() {
 
 # ---- smoke ----------------------------------------------------------------------------------------------------------
 smoke() {
-  local fail=0 h code loc i
+  local fail=0 h code loc i methods
   step "Public URLs (through Cloudflare)"
   for i in $(seq 1 12); do
     code="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 10 https://api.nearpay.money/healthz 2>/dev/null || true)"
@@ -343,19 +592,28 @@ smoke() {
   done
   if [ "$code" = 200 ]; then ok "https://api.nearpay.money/healthz → 200 (identity ready)"
   else bad "https://api.nearpay.money/healthz → ${code:-no answer} (beta.sh logs cloudflared; beta.sh logs identity-api)"; fail=1; fi
+  # each URL gets 3 tries with backoff: one dropped request through the tunnel is not a failure
   for h in nearpay.money pay.nearpay.money dashboard.nearpay.money docs.nearpay.money; do
-    code="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 10 "https://$h/" 2>/dev/null || true)"
+    code="$(http_code "https://$h/" 3)"
     case "$code" in 2* | 3*) ok "https://$h/ → $code" ;; *) bad "https://$h/ → ${code:-no answer}"; fail=1 ;; esac
   done
-  code="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 10 https://js.nearpay.money/v1/nearpay.js 2>/dev/null || true)"
+  code="$(http_code https://js.nearpay.money/v1/nearpay.js 3)"
   if [ "$code" = 200 ]; then ok "https://js.nearpay.money/v1/nearpay.js → 200"; else bad "https://js.nearpay.money/v1/nearpay.js → ${code:-no answer}"; fail=1; fi
-  loc="$(curl -sS -o /dev/null -w '%{http_code} %{redirect_url}' --max-time 10 https://www.nearpay.money/x 2>/dev/null || true)"
+  for i in 1 2 3; do
+    loc="$(curl -sS -o /dev/null -w '%{http_code} %{redirect_url}' --max-time 10 https://www.nearpay.money/x 2>/dev/null || true)"
+    [ "$loc" = "301 https://nearpay.money/x" ] && break
+    sleep $((i * 3))
+  done
   case "$loc" in "301 https://nearpay.money/x") ok "https://www.nearpay.money → https://nearpay.money" ;; *) bad "www redirect: got '$loc'"; fail=1 ;; esac
 
   # Continue with Google (ADR-0026): the dashboard asks identity whether to show the button
-  local methods want=false
+  local want=false
   [ -n "$(envval NP_GOOGLE_CLIENT_ID)" ] && [ -s "$beta/google_client_secret" ] && want=true
-  methods="$(curl -sS --max-time 10 https://dashboard.nearpay.money/api/v1/auth/methods 2>/dev/null || true)"
+  for i in 1 2 3; do
+    methods="$(curl -sS --max-time 10 https://dashboard.nearpay.money/api/v1/auth/methods 2>/dev/null || true)"
+    case "$methods" in *'"google":'*) break ;; esac
+    sleep $((i * 3))
+  done
   case "$methods" in
     *"\"google\":$want"*) ok "Continue with Google: $([ "$want" = true ] && echo on || echo off) (GET /v1/auth/methods)" ;;
     *) bad "GET https://dashboard.nearpay.money/api/v1/auth/methods → '${methods:0:120}' (expected google:$want; beta.sh logs identity-api)"; fail=1 ;;
@@ -363,7 +621,11 @@ smoke() {
 
   step "Cloudflare Access in front of the console"
   for h in "https://ops.nearpay.money/" "https://ops.nearpay.money/api/ops/merchants"; do
-    loc="$(curl -sS -o /dev/null -w '%{http_code} %{redirect_url}' --max-time 10 "$h" 2>/dev/null || true)"
+    for i in 1 2 3; do
+      loc="$(curl -sS -o /dev/null -w '%{http_code} %{redirect_url}' --max-time 10 "$h" 2>/dev/null || true)"
+      case "$loc" in 30[23]\ https://*.cloudflareaccess.com/* | 401\ * | 403\ *) break ;; esac
+      sleep $((i * 3))
+    done
     case "$loc" in
       30[23]\ https://*.cloudflareaccess.com/*) ok "$h → Cloudflare Access sign-in" ;;
       401\ * | 403\ *) ok "$h → ${loc%% *} (refused at the edge)" ;;
@@ -392,8 +654,12 @@ smoke() {
     ERROR) bad "Prometheus does not answer on 127.0.0.1:${pport:-9090}"; fail=1 ;;
     *) bad "Prometheus targets down: $down (still down after 2 min: docker compose -p nearpay-beta ps / logs <service>)"; fail=1 ;;
   esac
-  if curl -fsS --max-time 5 "http://127.0.0.1:$(envval NP_ALERTMANAGER_PORT)/-/ready" >/dev/null 2>&1; then ok "Alertmanager ready"
-  else bad "Alertmanager not ready (beta.sh logs alertmanager)"; fail=1; fi
+  local am_ready=0
+  for i in 1 2 3 4; do
+    if curl -fsS --max-time 5 "http://127.0.0.1:$(envval NP_ALERTMANAGER_PORT)/-/ready" >/dev/null 2>&1; then am_ready=1; break; fi
+    sleep $((i * 3))
+  done
+  if [ "$am_ready" = 1 ]; then ok "Alertmanager ready"; else bad "Alertmanager not ready (beta.sh logs alertmanager)"; fail=1; fi
 
   step "Live payments can route (rails routing health)"
   routing_check 6 || fail=1
@@ -404,7 +670,8 @@ smoke() {
     host="$(printf '%s' "$line" | sed -n 's/.*host: \([^,]*\),.*/\1/p')"
     port="$(printf '%s' "$line" | sed -n 's/.*port: \([0-9]*\).*/\1/p')"
     if [ -z "$host" ] || [ -z "$port" ]; then continue; fi
-    if bcompose exec -T egress-proxy nc -z -w 5 "$host" "$port" >/dev/null 2>&1; then ok "$host:$port"
+    if bcompose exec -T egress-proxy nc -z -w 5 "$host" "$port" >/dev/null 2>&1 ||
+      { sleep 3; bcompose exec -T egress-proxy nc -z -w 5 "$host" "$port" >/dev/null 2>&1; }; then ok "$host:$port"
     else bad "$host:$port unreachable from the stack (firewall/VPN on this Mac?)"; fail=1; fi
   done < <(grep 'beta_smoke: true' "$compose_dir/egress/allowlist.yaml")
   host="$(envval NP_CF_ACCESS_TEAM_DOMAIN)" # identity fetches the Access signing keys from here
@@ -412,11 +679,15 @@ smoke() {
   else bad "${host:-NP_CF_ACCESS_TEAM_DOMAIN}:443 unreachable from the stack"; fail=1; fi
 
   step "Telegram alert channel"
-  local chat res
+  local chat res=""
   chat="$(envval NP_TELEGRAM_CHAT_ID)"
+  for i in 1 2 3; do
+  [ "$res" = ok ] && break
+  [ "$i" -gt 1 ] && sleep $((i * 3))
   res="$(telegram sendMessage "data = \"chat_id=$chat\"" \
     "data-urlencode = \"text=NearPay beta: smoke test from $(hostname -s) at $(date -u '+%Y-%m-%d %H:%M UTC'). Alerts arrive in this chat.\"" |
     node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const j=JSON.parse(s);process.stdout.write(j.ok?"ok":String(j.description))}catch{process.stdout.write("no answer")}})' || true)"
+  done
   if [ "$res" = ok ]; then ok "test message sent to Telegram chat $chat"; else bad "Telegram: $res (run: scripts/beta.sh telegram)"; fail=1; fi
 
   say ""
@@ -430,6 +701,8 @@ case "$cmd" in
   up)
     pull=1
     for a in "$@"; do case "$a" in --no-pull) pull=0 ;; *) die "unknown option $a (usage: beta.sh up [--no-pull])" ;; esac; done
+    lock_wait 120 || die "another beta.sh up or watchdog round is running (pid $(cat "$lock_dir/pid" 2>/dev/null)); try again in a minute"
+    rm -f "$stopped_marker" # the owner wants the beta running: autostart, keep-awake and the watchdog resume
     preflight_machine
     preflight_repos "$pull"
     preflight_secrets
@@ -440,20 +713,34 @@ case "$cmd" in
     step "Keep this Mac awake"
     keep_awake
     step "Build and start (scripts/up.sh beta; the first run takes a while)"
+    # Recreated containers miss a scrape or two: silence the availability alerts (only those) until the smoke test is
+    # done (expired on exit; 30 min at most). A first start has no Alertmanager yet: nothing to silence.
+    silence_id="$(node "$deploy/scripts/lib/alertmanager-silence.mjs" create "http://127.0.0.1:$(envval NP_ALERTMANAGER_PORT)" 30 \
+      "scripts/beta.sh up on $(hostname -s)" 2>/dev/null || true)"
+    [ -n "$silence_id" ] && say "  availability alerts silenced during the deploy (Alertmanager silence $silence_id)"
     "$deploy/scripts/up.sh" beta
+    record_expected
     smoke || die "the beta is running but the smoke test failed; fix the FAIL lines and run: scripts/beta.sh smoke"
     say ""
     say "Grafana: http://127.0.0.1:$(envval NP_GRAFANA_PORT)  (user admin, password in .secrets/beta/grafana_admin_password)"
     say "Next: docs/beta-launch.md step 14 (operators, live setup)."
+    if is_macos && ! agent_loaded money.nearpay.beta.watchdog; then
+      say "Uptime: run 'scripts/beta.sh install-autostart' once, then 'scripts/beta.sh doctor' (docs/beta-launch.md 'Uptime')."
+    fi
     ;;
   down)
+    # the marker first: autostart, keep-awake and the watchdog must not bring the beta back
+    mkdir -p "$beta" && touch "$stopped_marker"
+    lock_wait 120 || warn "a beta.sh up / watchdog round is still running; stopping anyway"
     "$deploy/scripts/down.sh" beta
+    if agent_loaded "$keepawake_label"; then launchctl kill SIGTERM "gui/$(id -u)/$keepawake_label" 2>/dev/null || true; fi
     if [ -f "$beta/caffeinate.pid" ]; then kill "$(cat "$beta/caffeinate.pid")" 2>/dev/null || true; rm -f "$beta/caffeinate.pid"; fi
-    say "beta stopped (data kept; 'scripts/beta.sh up' starts it again)"
+    say "beta stopped (data kept; 'scripts/beta.sh up' starts it again; autostart and the watchdog stay off until then)"
     ;;
   status)
+    uptime_summary
+    step "Containers"
     bcompose ps -a --format 'table {{.Service}}\t{{.Status}}'
-    if [ -f "$beta/caffeinate.pid" ] && kill -0 "$(cat "$beta/caffeinate.pid")" 2>/dev/null; then say "keep-awake: on"; else say "keep-awake: OFF"; fi
     firing="$(curl -sS --max-time 5 "http://127.0.0.1:$(envval NP_ALERTMANAGER_PORT)/api/v2/alerts?active=true&silenced=false" 2>/dev/null |
       node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const a=JSON.parse(s);process.stdout.write(a.length?a.map(x=>x.labels.alertname+"("+(x.labels.service||x.labels.instance||"")+")").join(" "):"none")}catch{process.stdout.write("Alertmanager not answering")}})' || true)"
     say "firing alerts: $firing"
@@ -466,6 +753,39 @@ case "$cmd" in
     bcompose logs -f --tail 200 "$1"
     ;;
   smoke) smoke ;;
+  doctor)
+    step "This Mac keeps the beta running on its own (docs/beta-launch.md 'Uptime')"
+    doctor_rc=0
+    while IFS=$'\t' read -r k t fix; do
+      case "$k" in
+        rc) doctor_rc="$t"; continue ;;
+        ok) ok "$t" ;;
+        warn) warn "$t" ;;
+        *) bad "$t" ;;
+      esac
+      if [ -n "${fix:-}" ]; then printf '         %s\n' "$fix"; fi
+    done < <(rc=0; node "$deploy/scripts/lib/doctor.mjs" "$deploy" || rc=$?; printf 'rc\t%s\n' "$rc")
+    if [ -f "$beta/healthchecks_url" ]; then ok "dead-man's switch: the watchdog pings Healthchecks.io every round"
+    else warn "no dead-man's switch (optional, free: docs/beta-launch.md 'Uptime', Healthchecks.io)"; fi
+    uptime_summary || true
+    exit "$doctor_rc"
+    ;;
+  install-autostart) install_autostart ;;
+  uninstall-autostart) uninstall_autostart ;;
+  autostart) autostart ;;
+  watchdog)
+    case "${1:-run}" in
+      run) watchdog_round ;;
+      pause)
+        mins="${2:-60}"
+        printf '%s' "$mins" | grep -Eq '^[0-9]+$' || die "usage: beta.sh watchdog pause [minutes]"
+        mkdir -p "$beta" && echo $(($(date +%s) + mins * 60)) >"$pause_file"
+        say "watchdog healing paused for $mins min (it still checks and alerts); resume: scripts/beta.sh watchdog resume" ;;
+      resume) rm -f "$pause_file"; say "watchdog healing resumed" ;;
+      log) tail -n 50 "$log_dir/watchdog.log" 2>/dev/null || say "no watchdog log yet ($log_dir/watchdog.log)" ;;
+      *) die "usage: beta.sh watchdog [run|pause [minutes]|resume|log]" ;;
+    esac
+    ;;
   routing)
     step "Live payments can route (rails routing health)"
     routing_check 1 || { say ""; say "Runbook: docs/beta-launch.md 'Payments are temporarily unavailable'"; exit 1; }
@@ -482,6 +802,6 @@ case "$cmd" in
     shift
     bcompose exec "$svc-api" /nodejs/bin/node dist/ops.js "$@"
     ;;
-  -h | --help | "") sed -n '2,14p' "$0" ;;
+  -h | --help | "") sed -n '2,19p' "$0" ;;
   *) die "unknown command '$cmd' (beta.sh --help)" ;;
 esac
