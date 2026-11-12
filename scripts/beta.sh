@@ -34,7 +34,7 @@ stopped_marker="$beta/stopped"      # present after `beta.sh down`: autostart, k
 pause_file="$beta/watchdog.paused"  # `beta.sh watchdog pause`: epoch seconds until which the watchdog only reports
 wd_state="$beta/watchdog-state.json"
 expected_file="$beta/expected-services" # long-running services of the last successful `up` (watchdog: what is missing)
-lock_dir="$beta/run.lock"           # one `up` / autostart / watchdog round at a time
+lock_dir="$beta/run.lock"           # one `up` / autostart / watchdog round at a time: a symlink whose target is the pid
 log_dir="${NP_BETA_LOG_DIR:-$HOME/Library/Logs/NearPay}"
 agents_dir="$HOME/Library/LaunchAgents"
 AGENTS=(money.nearpay.beta.autostart money.nearpay.beta.keepawake money.nearpay.beta.watchdog)
@@ -82,45 +82,53 @@ readfile() { tr -d '[:space:]' <"$1"; }
 # ---- lock, exit hooks, notices --------------------------------------------------------------------------------------
 lock_held=0
 lock_blocked=0
+lock_pid=""
 silence_id=""
 on_exit() {
   if [ -n "$silence_id" ]; then
     node "$deploy/scripts/lib/alertmanager-silence.mjs" expire "http://127.0.0.1:$(envval NP_ALERTMANAGER_PORT)" "$silence_id" >/dev/null 2>&1 || true
   fi
-  if [ "$lock_held" = 1 ] && [ "$(cat "$lock_dir/pid" 2>/dev/null)" = "$$" ]; then rm -rf "$lock_dir"; fi
+  if [ "$lock_held" = 1 ] && [ "$(readlink "$lock_dir" 2>/dev/null)" = "$$" ]; then rm -f "$lock_dir"; fi
 }
 trap on_exit EXIT
 if [ "$(id -u)" = 0 ] && [ "${NP_BETA_ALLOW_ROOT:-0}" != 1 ]; then
   echo "beta.sh: do not run this with sudo; it creates files your user cannot remove. Run it as yourself." >&2; exit 1
 fi
 
-lock_try() { # succeeds when this process now holds the lock (stale locks of dead processes are taken over)
+lock_try() { # succeeds when this process now holds the lock
+  # The lock is a symlink run.lock -> <pid>, created atomically with the pid in it (never a lock without an owner).
+  # A lock whose process is gone, or that belongs to a process this user cannot see, is stale and taken over.
   [ "${NP_BETA_LOCK_HELD:-0}" = 1 ] && return 0 # a parent (watchdog/autostart) holds it for us
   mkdir -p "$beta"
-  if mkdir "$lock_dir" 2>/dev/null; then echo $$ >"$lock_dir/pid"; lock_held=1; return 0; fi
-  local pid
-  pid="$(cat "$lock_dir/pid" 2>/dev/null || true)"
-  if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then return 1; fi
-  # no pid yet: another process is between mkdir and writing it, unless the directory is older than a minute
-  if [ -z "$pid" ] && [ -z "$(find "$lock_dir" -maxdepth 0 -mmin +1 2>/dev/null)" ]; then return 1; fi
-  # a stale lock this user cannot read or remove (e.g. left by a command run with sudo) would block every run forever
-  if [ -d "$lock_dir" ] && { [ ! -r "$lock_dir" ] || [ ! -w "$lock_dir" ] || ! rm -rf "$lock_dir" 2>/dev/null; }; then
-    lock_blocked=1; return 1
+  if [ -d "$lock_dir" ] && [ ! -L "$lock_dir" ]; then # directory lock of an older beta.sh
+    rm -rf "$lock_dir" 2>/dev/null
+    if [ -e "$lock_dir" ]; then lock_blocked=1; return 1; fi
   fi
-  rm -rf "$lock_dir" 2>/dev/null
-  if mkdir "$lock_dir" 2>/dev/null; then echo $$ >"$lock_dir/pid"; lock_held=1; return 0; fi
+  if ln -s "$$" "$lock_dir" 2>/dev/null; then lock_held=1; return 0; fi
+  lock_pid="$(readlink "$lock_dir" 2>/dev/null || true)"
+  case "$lock_pid" in '' | *[!0-9]*) lock_pid="" ;; esac
+  if [ -n "$lock_pid" ] && kill -0 "$lock_pid" 2>/dev/null; then return 1; fi # a live round of ours
+  rm -f "$lock_dir" 2>/dev/null
+  if [ -e "$lock_dir" ] || [ -L "$lock_dir" ]; then lock_blocked=1; return 1; fi
+  if ln -s "$$" "$lock_dir" 2>/dev/null; then lock_held=1; return 0; fi
   return 1
+}
+
+lock_holder() { # "pid 123, running 01:02 (command)" for messages
+  [ -n "${lock_pid:-}" ] || { echo "unknown"; return; }
+  echo "pid $lock_pid, running $(ps -o etime= -p "$lock_pid" 2>/dev/null | tr -d ' '): $(ps -o command= -p "$lock_pid" 2>/dev/null | cut -c1-80)"
 }
 
 lock_wait() { # seconds
   local waited=0
   lock_blocked=0
+  lock_pid=""
   until lock_try; do
     if [ "$lock_blocked" = 1 ]; then
-      die "a leftover lock that this user cannot remove is blocking the beta ($lock_dir, probably from a command run with sudo). Remove it once: sudo rm -rf \"$lock_dir\" — then run the command again"
+      die "a leftover lock that this user cannot remove is blocking the beta ($lock_dir, left by a command run with sudo). Fix once: sudo rm -rf \"$lock_dir\" && sudo chown -R \"$(id -un)\" \"$secrets\" — then run the command again"
     fi
     [ "$waited" -ge "$1" ] && return 1
-    [ "$waited" = 0 ] && say "  …    waiting for another beta.sh up / watchdog round to finish (pid $(cat "$lock_dir/pid" 2>/dev/null))"
+    [ "$waited" = 0 ] && say "  …    waiting for the running beta.sh round to finish ($(lock_holder))"
     sleep 5
     waited=$((waited + 5))
   done
@@ -728,7 +736,7 @@ case "$cmd" in
   up)
     pull=1
     for a in "$@"; do case "$a" in --no-pull) pull=0 ;; *) die "unknown option $a (usage: beta.sh up [--no-pull])" ;; esac; done
-    lock_wait 120 || die "another beta.sh up or watchdog round is running (pid $(cat "$lock_dir/pid" 2>/dev/null)); try again in a minute"
+    lock_wait 120 || die "another beta.sh round is still running ($(lock_holder)); try again in a minute, or stop it: kill $lock_pid"
     rm -f "$stopped_marker" # the owner wants the beta running: autostart, keep-awake and the watchdog resume
     preflight_machine
     preflight_repos "$pull"
