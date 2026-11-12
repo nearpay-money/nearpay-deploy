@@ -99,6 +99,7 @@ services:
       interval: 15s
       timeout: 5s
       start_period: 30s
+      start_interval: 3s # `up --wait` sees it healthy as soon as the tunnel connects
       retries: 4 # 1 min without an edge connection = unhealthy → autoheal restarts it
     mem_limit: 256m
     mem_reservation: 32m
@@ -264,6 +265,7 @@ services:
       interval: 30s
       timeout: 10s
       start_period: 20s
+      start_interval: 3s
       retries: 3
     mem_limit: 128m
     pids_limit: 64
@@ -349,6 +351,7 @@ services:
       interval: 30s
       timeout: 5s
       start_period: 60s
+      start_interval: 3s
       retries: 5
     mem_limit: 512m
     volumes:
@@ -379,6 +382,8 @@ services:
       test: [CMD, wget, -q, -O, /dev/null, http://127.0.0.1:9100/]
       interval: 30s
       timeout: 5s
+      start_period: 15s
+      start_interval: 3s
       retries: 5
     mem_limit: 128m
     logging: *logging

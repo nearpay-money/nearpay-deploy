@@ -20,8 +20,6 @@ jobs:
           npm install -g pnpm@9.15.9
           pnpm -C scripts/live-setup install --frozen-lockfile
           pnpm -C scripts/live-setup test
-      - name: Deploy script tests (routing-health smoke, alert rules, runbook)
-        run: node --test --test-reporter=spec scripts/test/*.test.mjs
       - name: Seed throwaway test keys
         run: scripts/seed.sh keys
       - name: Compose configuration (every profile)
@@ -42,6 +40,9 @@ jobs:
             -f compose/compose.local.yaml -f .secrets/live/compose.live.yaml -f compose/compose.beta.yaml \
             --env-file compose/env/local.env --env-file compose/env/beta.env --env-file .secrets/public/keys.env \
             --profile '*' config --quiet
+      # after the Compose steps: the uptime tests also check the merged beta configuration (seeded keys, placeholders)
+      - name: Deploy script tests (routing-health smoke, alert rules, uptime, runbook)
+        run: node --test --test-reporter=spec scripts/test/*.test.mjs
       - name: Platform starts healthy
         run: |
           docker compose --project-name nearpay --project-directory compose -f compose/compose.yaml -f compose/compose.local.yaml \

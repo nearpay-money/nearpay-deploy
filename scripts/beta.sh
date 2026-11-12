@@ -719,6 +719,9 @@ case "$cmd" in
       "scripts/beta.sh up on $(hostname -s)" 2>/dev/null || true)"
     [ -n "$silence_id" ] && say "  availability alerts silenced during the deploy (Alertmanager silence $silence_id)"
     "$deploy/scripts/up.sh" beta
+    # Prometheus and Alertmanager read their files at start; Compose does not recreate them when only a mounted file
+    # changed (new rules, scrape jobs, Telegram chat): reload both (SIGHUP; no restart, no gap in alerting).
+    bcompose kill -s SIGHUP prometheus alertmanager >/dev/null 2>&1 || warn "could not reload Prometheus/Alertmanager (beta.sh logs prometheus)"
     record_expected
     smoke || die "the beta is running but the smoke test failed; fix the FAIL lines and run: scripts/beta.sh smoke"
     say ""

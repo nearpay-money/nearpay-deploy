@@ -19,16 +19,17 @@ What the pieces are (for orientation):
 | Prometheus, Grafana, Alertmanager | your Mac, `127.0.0.1` only | metrics, the "NearPay beta" dashboard, alerts → Telegram |
 | Resend | cloud | sends NearPay's emails from `receipts@nearpay.money` (100 a day on the free plan) |
 | Google Cloud (optional) | cloud | an OAuth client for "Continue with Google" on the dashboard (step 13a); identity verifies Google's tokens itself |
-| UptimeRobot | cloud | checks `https://api.nearpay.money/healthz` every 5 minutes from outside |
+| Autoheal, watchdog | your Mac (a container; launchd jobs) | restart what fails, start the beta at login, keep the Mac awake ("Uptime" below) |
+| UptimeRobot | cloud | checks the five public URLs every 5 minutes from outside |
 
 ---
 
 ## 0. Before you start
 
-- [ ] Docker Desktop is installed and running, with **Settings → Resources → Memory: 8 GB or more** (12 GB if you have 24 GB+ RAM) and **Disk usage limit ≥ 64 GB**. Turn on **Settings → General → Start Docker Desktop when you sign in**.
+- [ ] Docker Desktop is installed and running, with **Settings → Resources → Memory: 10 GB** (8 GB is the minimum; the beta's memory limits are sized for 10) and **Disk usage limit ≥ 64 GB**. Turn on **Settings → General → Start Docker Desktop when you sign in to your computer**.
 - [ ] Node.js 22, pnpm (`corepack enable`), git and the NearPay repositories in `~/work/near-hackathon/` (as for the local stack). The script builds every image from each repository's `main`.
 - [ ] `compose/env/local.env` has the live accounts from the mainnet checklist **C.1** (`NP_TREASURY_ACCOUNT`, `NP_RELAYER_ACCOUNT`, `NP_NEAR_RPC_URLS`, your RPC URLs) and `.secrets/live/relayer_key_1` … `relayer_key_4` exist (prepared on 7 Nov). **`NP_VAULT_CONTRACT` is optional for the first start**: leave it empty until the vault is deployed (live auto-debit stays off; `beta.sh` warns). Never set it to an account under `nearpay.near` such as `v1.vault.nearpay.near`: NearPay does not control `nearpay.near`, so payers' mandate funding would go to someone else's contract (`beta.sh` refuses it). The keeper key can come later too (step 15).
-- [ ] The Mac stays **plugged in with the lid open**. In **System Settings → Battery (or Energy) → Options**: turn on "Prevent automatic sleeping on power adapter when the display is off" and "Wake for network access". The script also runs `caffeinate` while the beta is up.
+- [ ] The Mac stays **plugged in with the lid open**. In **System Settings → Battery (or Energy) → Options**: turn on "Prevent automatic sleeping on power adapter when the display is off" and "Wake for network access". The sleep and power commands are in **"Uptime" → "Once, by you"** below; `scripts/beta.sh doctor` checks them.
 
 ## 1. Free security setup (do this first)
 
@@ -162,9 +163,23 @@ The bot `@NearPay_alertbot` exists already. For the beta you keep its current to
 
 ## 12. UptimeRobot (outside check)
 
-- [ ] Sign up at [uptimerobot.com](https://uptimerobot.com) (free) with `nearpaydotmoney@gmail.com`; enable 2FA.
-- [ ] **New monitor** → HTTP(s) → URL `https://api.nearpay.money/healthz` → interval **5 minutes** → alert contact: your email (add the Telegram integration too if you like). It turns red when the Mac sleeps, Docker stops, the tunnel drops or identity is not ready.
-- [ ] Optional second monitor: `https://nearpay.money`.
+The Mac cannot report that it is off, asleep or offline. UptimeRobot checks the site from outside every 5 minutes
+(free plan: 50 monitors, 5-minute interval) and tells you.
+
+- [ ] Sign up at [uptimerobot.com](https://uptimerobot.com) (free) with `nearpaydotmoney@gmail.com`; enable 2FA (My settings → Two-factor authentication).
+- [ ] **Telegram as alert contact**: **Integrations** (on some dashboards **Integrations & Team**) → **Telegram** → **Add**. It opens UptimeRobot's Telegram bot: press **Start**, and the chat becomes an alert contact. If UptimeRobot marks Telegram as a paid integration on your account, use **email** plus the **UptimeRobot mobile app** (push notifications, free) instead; the Mac's own watchdog alerts on Telegram either way.
+- [ ] **New monitor** five times, each **HTTP(s)** (website monitoring), interval **5 minutes**, notifications **Telegram** (and email):
+
+  | Friendly name | URL | Notes |
+  |---|---|---|
+  | NearPay API | `https://api.nearpay.money/healthz` | 200 only while sign-in (identity) is ready; optional: type **Keyword**, keyword `ok`, alert when it does **not** exist |
+  | NearPay site | `https://nearpay.money` | marketing site |
+  | NearPay checkout | `https://pay.nearpay.money` | hosted checkout |
+  | NearPay dashboard | `https://dashboard.nearpay.money` | merchant dashboard |
+  | NearPay docs | `https://docs.nearpay.money` | docs |
+
+- [ ] Optional public status page: **Status pages → New status page** → name `NearPay status`, add the five monitors → Save. It gets a free `stats.uptimerobot.com/…` address you can give beta merchants (your own domain on it is a paid feature).
+- [ ] They turn red when the Mac sleeps or is off, Docker stops, the tunnel drops, the home internet is down, or identity is not ready. The watchdog on the Mac usually fixes the last three by itself within minutes (see "Uptime").
 
 ## 13. Put the secrets on the Mac
 
@@ -257,6 +272,112 @@ Run **`claude/mainnet-checklist.md` sections A → C** with these beta differenc
   The beta runs strict (`NP_ENV=server`). Payout wallets have **no cool-off** (owner decision 2026-11-11, final; `NP_COOLOFF_SECONDS=0`, also identity's default): a new payout wallet is active, and live payments to it possible, as soon as its ownership is signed (and a second owner/admin approves, when the account has two); its screening, step-up and the "payout wallet active" security email still apply.
 - [ ] **C.6**: the dashboard shows **Live**; the console shows the kill switch **off**; Grafana's "Kill switch" tile says off.
 
+## Uptime
+
+The beta runs on one Mac, so "never stops" means: everything that can restart itself does, within about a minute,
+and you hear about anything that cannot. Three layers do that:
+
+| Layer | Watches | Does by itself | Tells you |
+|---|---|---|---|
+| Docker (`restart: unless-stopped`) | each container's process | restarts a container whose process exits; restarts every container when Docker Desktop starts | — |
+| **autoheal** (a container in the stack) | each container's health check | restarts a container that stays **unhealthy** (Docker never does): after ~3 min of failed checks, then with backoff 2, 4, 8, 16, 30 min, at most 3 restarts per 10 min. When many are unhealthy at once the Mac is overloaded: it holds back (restarting would add load). Postgres is left to you | Telegram via Alertmanager: `ContainerAutoHealed`, `ContainerUnhealthy`, `AutohealHeld`, `AutohealDown` |
+| **watchdog** (launchd, every minute) | Docker Desktop, stopped or missing containers, the public URLs through Cloudflare | opens Docker Desktop; `docker start` for a stopped service; `scripts/beta.sh up --no-pull` when containers are missing (at most every 15 min); restarts `cloudflared` when every URL fails with a tunnel error | Telegram directly (works even when Alertmanager is down): once when a problem starts, every 6 h while it lasts, once when it clears |
+| **UptimeRobot** (cloud) | the five public URLs from outside | — | Telegram or email/app: the Mac is off, asleep or offline |
+
+Also automatic now:
+
+- **Health checks**: every long-running container has one. They check **liveness** (is the process answering?
+  NearPay services: `GET /healthz`), never readiness, so a Postgres or NATS outage makes services *not ready* but
+  never triggers a wave of restarts. `cloudflared` is healthy while it holds a connection to Cloudflare.
+- **At login** (launchd `money.nearpay.beta.autostart`): waits for Docker Desktop (opens it if needed), gives Docker a
+  minute to restart the containers, then runs `scripts/beta.sh up --no-pull` only if containers are missing. It sends a
+  Telegram note so you know the Mac restarted.
+- **Keep-awake** (launchd `money.nearpay.beta.keepawake`): `caffeinate -ims` owned by launchd, so closing Terminal or
+  logging out of a shell does not end it, and launchd restarts it if it dies.
+- **Memory limits**: each NearPay process stops at 1 GB (it restarts instead of starving the Mac); Postgres has no cap
+  and the kernel's out-of-memory killer picks any other container first. Postgres and Valkey are sized for 10 GB.
+- **Disk**: every container's log rotates at 10 MB × 3; Prometheus keeps at most 2 GB.
+- **Deploys**: `scripts/beta.sh up` silences only the availability alerts (`ServiceDown`, `PlatformComponentDown`,
+  the container alerts) while it recreates containers, and lifts the silence after the smoke test. Money-path alerts
+  are never silenced. The smoke test retries each check with backoff before it reports a failure.
+- **`scripts/beta.sh down`** means "off on purpose": it leaves a marker, so autostart, keep-awake and the watchdog
+  stand still until the next `scripts/beta.sh up`. Stopping containers any other way (Docker Desktop's stop button,
+  `docker stop`) is undone by the watchdog within a minute.
+
+### Once, by you
+
+1. **Docker Desktop** → Settings → General → tick **Start Docker Desktop when you sign in to your computer**. Settings →
+   Resources → Memory **10 GB** → Apply & restart.
+2. **Never sleep on the power adapter** (Terminal, your Mac password):
+
+   ```sh
+   sudo pmset -c sleep 0 disksleep 0
+   sudo pmset autorestart 1        # start again by itself after a power failure (desktop Macs; MacBooks skip it)
+   sudo pmset -c womp 1            # wake for network access
+   ```
+
+   Keep it **plugged in with the lid open** (a MacBook with the lid closed sleeps unless an external display, keyboard
+   and mouse are attached).
+3. **macOS updates**: System Settings → General → Software Update → Automatic updates (i) → turn off **Install macOS
+   updates** for the beta (keep "Download new updates"). Install updates yourself at a quiet time.
+4. **Login after a restart.** Launchd jobs and Docker Desktop need you signed in. Keep **FileVault on** (the live
+   relayer keys are on this disk): macOS then cannot log in by itself, so after a power cut or crash the beta stays down
+   until you type your password at the Mac (UptimeRobot tells you). For a planned restart run
+   `sudo fdesetup authrestart`: the Mac restarts, unlocks the disk once and signs in, and the beta comes back alone.
+   (Automatic login — System Settings → Users & Groups → Automatically log in as — is only possible with FileVault
+   off; not recommended here.) Locking the screen is fine; do not log out.
+5. **Install the launchd jobs** (after the beta has started once with `scripts/beta.sh up`):
+
+   ```sh
+   scripts/beta.sh install-autostart
+   scripts/beta.sh doctor          # every check with its fix; repeat until there is no FAIL
+   ```
+
+   Keep the repositories where they are (`~/work/near-hackathon/`): macOS does not let launchd jobs read Desktop,
+   Documents or Downloads. Remove the jobs with `scripts/beta.sh uninstall-autostart`.
+6. **UptimeRobot**: step 12.
+7. Optional, free: **a dead man's switch** that alerts when the Mac stops checking in (asleep, off, offline, launchd
+   stuck). [healthchecks.io](https://healthchecks.io) → sign up → **Add check** → name `nearpay-beta-mac`, period
+   **1 minute**, grace **5 minutes** → **Integrations → Telegram** (follow its link, press Start) → copy the check's
+   **ping URL** and, on the Mac: `pbpaste | tr -d '\n' > .secrets/beta/healthchecks_url`. The watchdog pings it every
+   round (a `/fail` ping while it sees a problem).
+8. Optional: Cloudflare → nearpay.money → **Caching → Configuration → Always Online → On** (free). When the origin is
+   unreachable, Cloudflare may show a cached copy of public pages such as the marketing site and docs; it never covers
+   the API, checkout or dashboard, and it does not help with every tunnel error. Custom error pages ("we'll be right
+   back") need a paid Cloudflare plan.
+9. Check: `scripts/beta.sh status` starts with the **Uptime** summary — Docker, containers, tunnel, autoheal,
+   watchdog (last round), the public health URL, keep-awake, autostart, kill switch and live routing.
+
+### When something fires
+
+| Message | What it means | What to do |
+|---|---|---|
+| `ContainerAutoHealed` | autoheal restarted a container whose health check kept failing | nothing if it is a one-off; if it repeats: `scripts/beta.sh logs <container>` |
+| `ContainerUnhealthy` | still unhealthy after 10 min (autoheal backing off, or Postgres, which it never restarts) | `scripts/beta.sh logs <container>`; then `docker restart <container>` |
+| `AutohealHeld` | many containers unhealthy at once: the Mac or Docker is overloaded | `docker stats --no-stream`, `scripts/beta.sh doctor`; free memory/CPU (close apps), check the disk (`DiskLow`) |
+| `AutohealDown` | autoheal is not running (the watchdog still restarts unhealthy containers after 5 min) | `scripts/beta.sh logs autoheal`, `scripts/beta.sh up` |
+| watchdog: Docker Desktop is not answering | Docker Desktop quit or hung | it is being opened; if it does not come back, quit and reopen Docker Desktop (or restart the Mac with `sudo fdesetup authrestart`) |
+| watchdog: beta containers are missing | containers were removed | the watchdog runs `scripts/beta.sh up --no-pull`; its output: `~/Library/Logs/NearPay/watchdog-up.log` |
+| watchdog: these containers keep stopping | a service exits right after starting | `scripts/beta.sh logs <name>` (a missing secret, config or database error) |
+| watchdog: public URLs fail | Cloudflare cannot reach the stack; on tunnel errors (530) the watchdog restarts cloudflared | `scripts/beta.sh logs cloudflared`; a 503 on the API = identity not ready: `scripts/beta.sh logs identity-api` |
+| watchdog: the Mac cannot reach the internet | router, Wi-Fi or ISP | fix the connection; everything resumes by itself |
+| UptimeRobot / Healthchecks.io: down | the Mac is off, asleep, offline or signed out | go to the Mac: power, lid, network, sign in; then `scripts/beta.sh status` |
+
+To work on the stack without the watchdog interfering: `scripts/beta.sh watchdog pause 30` (minutes; it still checks
+and alerts, it only stops healing), then `scripts/beta.sh watchdog resume`. Its log: `scripts/beta.sh watchdog log`
+(`~/Library/Logs/NearPay/watchdog.log`).
+
+### What can still take the beta down
+
+| Single point of failure | Cheapest mitigation |
+|---|---|
+| The Mac itself (hardware, macOS crash, a restart that waits at the FileVault screen) | `sudo pmset autorestart 1`; planned restarts with `sudo fdesetup authrestart`; UptimeRobot + Healthchecks.io tell you within 5 min; after the beta: the VPS move |
+| Power | keep the MacBook plugged in (its battery bridges short cuts); a small UPS for the router and a desktop Mac |
+| Home internet / router | a phone hotspot as fallback (cloudflared reconnects by itself over any network); UPS for the router |
+| Docker Desktop (hangs, updates) | the watchdog reopens it; turn off Docker Desktop's automatic updates during the beta (Settings → Software updates) |
+| Postgres (one instance, no backups in v1) | the disk alerts (`DiskLow`, `DiskCritical`); never `docker compose down -v`; backups arrive with the VPS |
+| Cloudflare (DNS, tunnel, Access) | none needed at this size (Cloudflare's own redundancy); the tunnel keeps four connections to two data centres |
+
 ## Console sign-in (decided 2026-11-09)
 
 - **Cloudflare Access** (`NP_OPS_AUTH_MODE=cloudflare_access`, team `nearpay-money`): Access lets only `nearpaydotmoney@gmail.com` in with an emailed one-time code (Google login optional, step 7; session 8 hours), and identity verifies Access's token on every console request. Actions that need a fresh confirmation ask you to log in to Access again. Protect the Google account with an authenticator app and printed backup codes (step 1): it is the key to the console.
@@ -280,6 +401,7 @@ Each message says what is wrong, where, since when, and a first command to try. 
 | KeeperCollectFailed, KeeperStuck, VaultEventsRejected | auto-debit collections: `logs billing-worker`; check the keeper account has NEAR for gas |
 | EmailCapLow, EmailCapped, EmailFailures | Resend dashboard → Usage / Logs; `logs notify-worker` |
 | DiskLow, DiskCritical | `docker system df`, `docker image prune`, `docker builder prune`; raise Docker Desktop's disk limit |
+| ContainerAutoHealed, ContainerUnhealthy, AutohealHeld, AutohealDown, watchdog messages | see "Uptime" → "When something fires" |
 | SingleOperatorAction (notice) | confirm it was you (see "Console sign-in") |
 
 ### "Payments are temporarily unavailable"
@@ -308,20 +430,23 @@ scripts/beta.sh ops rails routing-health live    # straight from rails: reasons,
 
 The price checks are never relaxed to get payments going again: fix the feed, not the rule.
 
-UptimeRobot emails you separately when the site is unreachable from outside: check the Mac is awake, Docker Desktop is running, then `scripts/beta.sh up`.
+UptimeRobot alerts you separately when the site is unreachable from outside: check the Mac is awake, signed in and online; `scripts/beta.sh status` shows the rest ("Uptime").
 
 ## Day to day
 
 | Command | What it does |
 |---|---|
-| `scripts/beta.sh status` | containers, firing alerts, keep-awake, memory per container, the tunnel hostnames |
+| `scripts/beta.sh status` | the uptime summary (containers, tunnel, autoheal, watchdog, keep-awake, autostart, kill switch, live routing), firing alerts, memory per container, the tunnel hostnames |
+| `scripts/beta.sh doctor` | is this Mac set up to keep the beta running on its own? each problem with its fix |
+| `scripts/beta.sh watchdog pause 30` / `resume` / `log` | stop the watchdog healing for a while (it still alerts), resume, show its log |
+| `scripts/beta.sh install-autostart` / `uninstall-autostart` | the launchd jobs: start at login, keep awake, watchdog every minute |
 | `scripts/beta.sh logs <container>` | follow logs (`cloudflared`, `traefik`, `payments-api`, `notify-worker`, …) |
 | `scripts/beta.sh smoke` | public URLs, Access on ops, Prometheus targets, live payments can route, outbound hosts, Telegram test message |
 | `scripts/beta.sh routing` | can live payments route? if not, each reason with its fix ("Payments are temporarily unavailable") |
 | `scripts/beta.sh up` | update to the latest `main` everywhere and restart what changed (safe to repeat) |
-| `scripts/beta.sh down` | stop the beta (data is kept) and let the Mac sleep |
+| `scripts/beta.sh down` | stop the beta on purpose (data is kept): autostart, keep-awake and the watchdog stand still until `up` |
 | `scripts/beta.sh telegram` | find the Telegram chat again (e.g. after a new bot token) |
 
-- After a macOS update or reboot: sign in, wait for Docker Desktop, run `scripts/beta.sh up`.
+- After a macOS update or reboot: sign in (FileVault asks for your password once); Docker Desktop and the beta start by themselves, and Telegram says so. `scripts/beta.sh status` to check.
 - The beta keeps its own data (Compose project `nearpay-beta`), separate from the local test stack; `beta.sh up` stops the local stack if it is running. There are no backups in v1.
 - Monitoring UIs listen on `127.0.0.1` only: Grafana `:3000`, Prometheus `:9090`, Alertmanager `:9093`.
