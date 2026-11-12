@@ -75,6 +75,10 @@ scrape_configs:
   - job_name: node
     static_configs: [{ targets: ["node-exporter:9100"] }]
 
+  # Autoheal (compose/autoheal/autoheal.mjs): restarts of unhealthy containers, current unhealthy ones (rules/uptime.yml).
+  - job_name: autoheal
+    static_configs: [{ targets: ["autoheal:9464"] }]
+
   - job_name: prometheus
     static_configs: [{ targets: ["localhost:9090"] }]
 
