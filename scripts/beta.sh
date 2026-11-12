@@ -346,6 +346,10 @@ preflight_live() {
   for v in NP_TREASURY_ACCOUNT NP_RELAYER_ACCOUNT NP_NEAR_RPC_URLS; do
     if [ -n "$(envval "$v")" ]; then ok "$v=$(envval "$v")"; else bad "$v is empty in compose/env/local.env"; missing=1; fi
   done
+  case "$(envval NP_NEAR_RPC_URLS)" in
+    https://rpc.mainnet.near.org*)
+      warn "NP_NEAR_RPC_URLS starts with rpc.mainnet.near.org (deprecated, 30 requests/min): every call pays a failover first. Put your keyed RPC or https://free.rpc.fastnear.com first, near.org last (compose/env/local.env.example)" ;;
+  esac
   # The vault is optional for the first start; never an account under nearpay.near (someone else controls it, and
   # live checkout would send payers' mandate funding to whatever contract they deploy there).
   vault="$(envval NP_VAULT_CONTRACT)"
@@ -414,8 +418,10 @@ wd_env() { # the environment scripts/lib/watchdog.mjs reads
   export NP_WD_PROJECT="$project" NP_WD_STATE="$wd_state" NP_WD_LOG="$log_dir/watchdog.log" NP_WD_UP_LOG="$log_dir/watchdog-up.log" \
     NP_WD_EXPECTED="$expected_file" NP_WD_BETA_SH="$deploy/scripts/beta.sh" NP_WD_INSTALLED="$installed" \
     NP_WD_HEALTHCHECKS_URL_FILE="$beta/healthchecks_url" NP_TELEGRAM_TOKEN_FILE="$beta/telegram_bot_token" \
-    NP_TELEGRAM_CHAT_ID NP_WD_HOST
+    NP_TELEGRAM_CHAT_ID NP_WD_HOST NP_WD_PROMETHEUS_URL NP_WD_ALERTMANAGER_URL
   NP_TELEGRAM_CHAT_ID="$(envval NP_TELEGRAM_CHAT_ID)"
+  NP_WD_PROMETHEUS_URL="http://127.0.0.1:$(envval NP_PROMETHEUS_PORT)"
+  NP_WD_ALERTMANAGER_URL="http://127.0.0.1:$(envval NP_ALERTMANAGER_PORT)"
   NP_WD_HOST="$(hostname -s)"
   NP_WD_STOPPED=0; [ -e "$stopped_marker" ] && NP_WD_STOPPED=1
   NP_WD_PAUSED=0; wd_paused && NP_WD_PAUSED=1
@@ -551,18 +557,27 @@ uptime_summary() {
 # ---- live routing (rails routing health via Prometheus) -------------------------------------------------------------
 # Prints ok / FAIL with each blocking reason and its fix (scripts/lib/routing-health.mjs). $1 = tries (15 s apart) while
 # the answer is not "ok": right after `up`, rails needs a few seconds to read the kill switch and Prometheus to scrape.
+# $2 = "ops": also read sentinel's kill switch and rails' copy with the ops CLIs (`beta.sh routing`), so a blocked
+# kill switch shows both versions and the right next step (release, or "rails missed the release").
 routing_check() {
-  local tries="${1:-1}" n=0 out status rc port
+  local tries="${1:-1}" n=0 out status rc port ops_args=() ops_dir=""
   port="$(envval NP_PROMETHEUS_PORT)"
   local url="http://127.0.0.1:${port:-9090}"
+  if [ "${2:-}" = ops ]; then
+    ops_dir="$(mktemp -d)"
+    bcompose exec -T sentinel-api /nodejs/bin/node dist/ops.js kill-switch >"$ops_dir/sentinel.json" 2>/dev/null || :
+    bcompose exec -T rails-api /nodejs/bin/node dist/ops.js flags >"$ops_dir/rails.json" 2>/dev/null || :
+    ops_args=(--ops-sentinel "$ops_dir/sentinel.json" --ops-rails "$ops_dir/rails.json")
+  fi
   while :; do
     rc=0
-    out="$(node "$deploy/scripts/lib/routing-health.mjs" "$url" 2>&1)" || rc=$?
+    out="$(node "$deploy/scripts/lib/routing-health.mjs" "$url" ${ops_args[@]+"${ops_args[@]}"} 2>&1)" || rc=$?
     n=$((n + 1))
     [ "$rc" = 0 ] || [ "$n" -ge "$tries" ] && break
     [ "$n" = 1 ] && printf '  …    waiting for live routing health (%s)\n' "$(printf '%s' "$out" | head -1)"
     sleep 15
   done
+  [ -n "$ops_dir" ] && rm -rf "$ops_dir"
   status="$(printf '%s\n' "$out" | head -1)"
   case "$status" in
     ok)
@@ -791,7 +806,7 @@ case "$cmd" in
     ;;
   routing)
     step "Live payments can route (rails routing health)"
-    routing_check 1 || { say ""; say "Runbook: docs/beta-launch.md 'Payments are temporarily unavailable'"; exit 1; }
+    routing_check 1 ops || { say ""; say "Runbook: docs/beta-launch.md 'Payments are temporarily unavailable'"; exit 1; }
     ;;
   telegram)
     preflight_telegram rediscover

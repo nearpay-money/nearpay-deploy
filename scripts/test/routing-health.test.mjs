@@ -2,13 +2,24 @@
 //   node --test scripts/test/
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { createServer } from "node:http";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
-import { FIX, QUERIES, readRouting, verdict } from "../lib/routing-health.mjs";
+import {
+  FIX,
+  MISSED_RELEASE_STEPS,
+  QUERIES,
+  RELEASE_STEPS,
+  killSwitchFromOps,
+  killSwitchLines,
+  mergeKillSwitch,
+  readRouting,
+  verdict,
+} from "../lib/routing-health.mjs";
 
 const deploy = join(dirname(fileURLToPath(import.meta.url)), "../..");
 const script = join(deploy, "scripts/lib/routing-health.mjs");
@@ -25,8 +36,8 @@ const RAILS_REASONS = [
   "token_registry_stale",
 ];
 
-/** A fake Prometheus answering the three instant queries. */
-async function fakePrometheus({ available, reasons = [], age = 12 }) {
+/** A fake Prometheus answering the instant queries (unknown queries: empty vector). */
+async function fakePrometheus({ available, reasons = [], age = 12, ks = {} }) {
   const vec = (metric, v) => ({ metric, value: [1_762_000_000, String(v)] });
   const server = createServer((req, res) => {
     const q = new URL(req.url, "http://x").searchParams.get("query");
@@ -34,6 +45,9 @@ async function fakePrometheus({ available, reasons = [], age = 12 }) {
     if (q === QUERIES.available) result = available === null ? [] : [vec({}, available)];
     else if (q === QUERIES.blocked) result = reasons.map((reason) => vec({ reason }, 1));
     else if (q === QUERIES.registryAge) result = age === null ? [] : [vec({}, age)];
+    else if (q === QUERIES.sentinelEngaged && ks.engaged !== undefined) result = [vec({}, ks.engaged)];
+    else if (q === QUERIES.sentinelVersion && ks.sentinel !== undefined) result = [vec({}, ks.sentinel)];
+    else if (q === QUERIES.railsVersion && ks.rails !== undefined) result = [vec({}, ks.rails)];
     res.writeHead(200, { "content-type": "application/json" });
     res.end(JSON.stringify({ status: "success", data: { resultType: "vector", result } }));
   });
@@ -41,8 +55,8 @@ async function fakePrometheus({ available, reasons = [], age = 12 }) {
   return { url: `http://127.0.0.1:${server.address().port}`, close: () => new Promise((r) => server.close(r)) };
 }
 
-const run = (url) =>
-  promisify(execFile)(process.execPath, [script, url]).then(
+const run = (url, ...extra) =>
+  promisify(execFile)(process.execPath, [script, url, ...extra]).then(
     (r) => ({ code: 0, out: r.stdout }),
     (e) => ({ code: e.code, out: e.stdout }),
   );
@@ -71,6 +85,7 @@ test("reads the gauges from Prometheus (+Inf registry age)", async () => {
       available: 0,
       reasons: ["cross_chain_paused", "treasury_unset"],
       registryAgeS: Number.POSITIVE_INFINITY,
+      killSwitch: { sentinelEngaged: null, sentinelVersion: null, railsVersion: null },
     });
   } finally {
     await p.close();
@@ -95,6 +110,78 @@ test("CLI exit codes: 0 routes, 1 blocked (reasons + fixes), 3 no data / Prometh
   }
   const down = await run("http://127.0.0.1:9");
   assert.equal(down.code, 3);
+});
+
+test("kill switch engaged: versions, then the single-operator release walkthrough (never the CLI release)", () => {
+  const v = verdict({
+    available: 0,
+    reasons: ["kill_switch_engaged"],
+    registryAgeS: 5,
+    killSwitch: { sentinelEngaged: 1, sentinelVersion: 7, railsVersion: 7 },
+  });
+  assert.equal(v.lines[0].split(":")[0], "kill_switch_engaged");
+  assert.equal(v.lines[1], "kill switch: sentinel engaged (version 7); rails' copy engaged (version 7)");
+  assert.deepEqual(v.lines.slice(2), RELEASE_STEPS);
+  const text = RELEASE_STEPS.join("\n");
+  assert.match(text, /Request release/);
+  assert.match(text, /wait 5 minutes/);
+  assert.match(text, /log in to Cloudflare Access again/);
+  assert.match(text, /at least 20 characters/);
+  assert.match(text, /ops rails flags shows quoting_enabled true and source_version/);
+  assert.match(text, /ops sentinel quarantines is empty/);
+  assert.doesNotMatch(text, /kill-switch-release/); // refused on the server (two_person_required)
+  // unknown versions: says where to read them
+  assert.match(killSwitchLines({}).join("\n"), /state unknown \(version unknown\).*\n.*ops sentinel kill-switch and ops rails flags/);
+});
+
+test("kill switch: sentinel released but rails still engaged = missed release, not 'release again'", () => {
+  const v = verdict({
+    available: 0,
+    reasons: ["kill_switch_engaged"],
+    registryAgeS: 5,
+    killSwitch: { sentinelEngaged: false, sentinelVersion: 8, railsVersion: 7 },
+  });
+  assert.equal(v.lines[1], "kill switch: sentinel released (version 8); rails' copy engaged (version 7)");
+  assert.deepEqual(v.lines.slice(2), MISSED_RELEASE_STEPS);
+  assert.match(MISSED_RELEASE_STEPS.join("\n"), /flag-set quoting_enabled true .*keeps source_version/);
+  assert.doesNotMatch(MISSED_RELEASE_STEPS.join("\n"), /Request release|kill-switch-release/);
+  // other reasons: no kill-switch lines
+  assert.deepEqual(verdict({ available: 0, reasons: ["treasury_unset"], registryAgeS: 5 }).lines.length, 1);
+});
+
+test("kill switch facts from the ops CLIs win over Prometheus", () => {
+  const sentinel = JSON.stringify({ engaged: false, version: 12, reason: "x", actor: "ops", log: [] }, null, 2);
+  const rails = JSON.stringify([
+    { name: "cross_chain_enabled", value: true, source_version: null },
+    { name: "quoting_enabled", value: false, source_version: "11", known: true },
+  ]);
+  const ops = killSwitchFromOps(sentinel, rails);
+  assert.deepEqual(ops, { sentinelEngaged: false, sentinelVersion: 12, railsVersion: 11 });
+  assert.deepEqual(killSwitchFromOps("not json", ""), { sentinelEngaged: null, sentinelVersion: null, railsVersion: null });
+  assert.deepEqual(mergeKillSwitch({ sentinelEngaged: 1, sentinelVersion: null, railsVersion: 11 }, { sentinelEngaged: false, sentinelVersion: 12, railsVersion: null }), {
+    sentinelEngaged: false,
+    sentinelVersion: 12,
+    railsVersion: 11,
+  });
+});
+
+test("CLI: kill-switch versions from Prometheus, overridden by --ops-* files", async () => {
+  const p = await fakePrometheus({ available: 0, reasons: ["kill_switch_engaged"], ks: { engaged: 1, sentinel: 4, rails: 4 } });
+  const dir = mkdtempSync(join(tmpdir(), "rh-"));
+  try {
+    let r = await run(p.url);
+    assert.equal(r.code, 1);
+    assert.match(r.out, /kill switch: sentinel engaged \(version 4\); rails' copy engaged \(version 4\)/);
+    assert.match(r.out, /Request release/);
+    writeFileSync(join(dir, "s.json"), JSON.stringify({ engaged: false, version: 5 }));
+    writeFileSync(join(dir, "r.json"), JSON.stringify([{ name: "quoting_enabled", value: false, source_version: 4 }]));
+    r = await run(p.url, "--ops-sentinel", join(dir, "s.json"), "--ops-rails", join(dir, "r.json"));
+    assert.match(r.out, /kill switch: sentinel released \(version 5\); rails' copy engaged \(version 4\)/);
+    assert.match(r.out, /rails missed sentinel's release event/);
+  } finally {
+    await p.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("the alert rules and the runbook cover every reason", () => {

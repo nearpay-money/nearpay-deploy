@@ -72,7 +72,9 @@ x-pricing-env: &pricing-env
   NP_PRICING_CURRENCIES: ${NP_PRICING_CURRENCIES:-usd,eur,gbp,chf,jpy,cad,aud}
 
 x-chain-env: &chain-env
-  NP_NEAR_RPC_URLS: ${NP_NEAR_RPC_URLS:-https://rpc.mainnet.near.org,https://free.rpc.fastnear.com}
+  # NEAR RPC failover order: FastNEAR first; rpc.mainnet.near.org is deprecated (30 requests/min) and kept as last resort.
+  # Owner-provided keyed URLs go first in local.env (compose/egress/allowlist.yaml lists the default hosts).
+  NP_NEAR_RPC_URLS: ${NP_NEAR_RPC_URLS:-https://free.rpc.fastnear.com,https://near.drpc.org,https://rpc.mainnet.near.org}
   NP_INTENTS_CONTRACT: ${NP_INTENTS_CONTRACT:-intents.near}
   NP_TREASURY_ACCOUNT: ${NP_TREASURY_ACCOUNT:-}
   NP_ONECLICK_BASE_URL: ${NP_ONECLICK_BASE_URL:-https://1click.chaindefuser.com}
@@ -373,7 +375,7 @@ services:
       NP_WEBAUTHN_ORIGINS: https://dashboard.${NP_BASE_DOMAIN:-nearpay.localhost}${NP_PORT_SUFFIX:-},https://ops.${NP_BASE_DOMAIN:-nearpay.localhost}${NP_PORT_SUFFIX:-}
       # payout wallets activate at attestation/approval; no cool-off by default (owner decision 2026-11-11, final)
       NP_COOLOFF_SECONDS: ${NP_COOLOFF_SECONDS:-0}
-      NP_NEAR_RPC_URLS: ${NP_NEAR_RPC_URLS:-https://rpc.mainnet.near.org,https://free.rpc.fastnear.com}
+      NP_NEAR_RPC_URLS: ${NP_NEAR_RPC_URLS:-https://free.rpc.fastnear.com,https://near.drpc.org,https://rpc.mainnet.near.org}
       # console (step 2.1/2.2): operator passkeys; RP id = host of NP_OPS_ORIGIN (x-env). The server stage adds
       # NP_OPS_ATTESTATION_ROOTS_FILE (vendor attestation roots, required there).
       NP_OPS_AAGUID_ALLOWLIST_FILE: /etc/nearpay/ops-aaguids.txt
@@ -421,7 +423,7 @@ services:
       NP_TICKET_SIGNING_KEY_FILE: /run/secrets/payments_ticket_key
       NP_TURNSTILE_SECRET_FILE: /run/secrets/turnstile_secret
       # Verifier current_salt for live refund legs signed from an Intents account (payments §8.4)
-      NP_NEAR_RPC_URLS: ${NP_NEAR_RPC_URLS:-https://rpc.mainnet.near.org,https://free.rpc.fastnear.com}
+      NP_NEAR_RPC_URLS: ${NP_NEAR_RPC_URLS:-https://free.rpc.fastnear.com,https://near.drpc.org,https://rpc.mainnet.near.org}
       # payment-link session limiter (payments §19.1): per client network, per link + client network, per link
       NP_LINK_SESSIONS_PER_IP: ${NP_LINK_SESSIONS_PER_IP:-10}
       NP_LINK_SESSIONS_PER_LINK_CLIENT: ${NP_LINK_SESSIONS_PER_LINK_CLIENT:-5}
@@ -763,7 +765,7 @@ services:
       # Stage 4 auto-debit (billing §8, §14–§15). Live: the vault (vault-env) over NEAR RPC, keeper account here and its
       # function-call key from the live overlay (.secrets/live/keeper_key → NP_KEEPER_KEY_FILE on the worker; without it
       # the live keeper does not collect). Test: the sandbox stand-in over POST /sim/near-rpc (NP_SANDBOX_BASE_URL).
-      NP_NEAR_RPC_URLS: ${NP_NEAR_RPC_URLS:-https://rpc.mainnet.near.org,https://free.rpc.fastnear.com}
+      NP_NEAR_RPC_URLS: ${NP_NEAR_RPC_URLS:-https://free.rpc.fastnear.com,https://near.drpc.org,https://rpc.mainnet.near.org}
       NP_KEEPER_ACCOUNT: ${NP_KEEPER_ACCOUNT:-}
       NP_TEST_NEAR_RPC_URLS: http://sandbox-api:8080/sim/near-rpc
       NP_TEST_KEEPER_ACCOUNT: ${NP_TEST_KEEPER_ACCOUNT:-keeper.sandbox.near}

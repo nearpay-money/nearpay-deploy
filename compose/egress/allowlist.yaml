@@ -20,23 +20,26 @@ services:
     # (.secrets/beta/beta.env); `scripts/beta.sh smoke` checks it from that value. Server-stage filter: add the host.
     - { host: "${NP_CF_ACCESS_TEAM_DOMAIN}", port: 443 }
     - { host: challenges.cloudflare.com, port: 443, beta_smoke: true }
-    - { host: rpc.mainnet.near.org, port: 443, beta_smoke: true }
-    - { host: free.rpc.fastnear.com, port: 443 }
+    - { host: free.rpc.fastnear.com, port: 443, beta_smoke: true }
+    - { host: near.drpc.org, port: 443 }
+    - { host: rpc.mainnet.near.org, port: 443 }
     # Continue with Google (ADR-0026, only while NP_GOOGLE_CLIENT_ID + the secret are set): code exchange and JWKS
     - { host: oauth2.googleapis.com, port: 443, beta_smoke: true }
     - { host: www.googleapis.com, port: 443, beta_smoke: true }
   payments: # Turnstile siteverify, NEAR RPC (verifier salt for live refund legs)
     - { host: challenges.cloudflare.com, port: 443 }
-    - { host: rpc.mainnet.near.org, port: 443 }
     - { host: free.rpc.fastnear.com, port: 443 }
+    - { host: near.drpc.org, port: 443 }
+    - { host: rpc.mainnet.near.org, port: 443 }
   rails: # 1Click, chain RPCs, neardata, Explorer (opt-in), secondary prices, FX
     - { host: 1click.chaindefuser.com, port: 443, beta_smoke: true }
     - { host: explorer.near-intents.org, port: 443, beta_smoke: true }
     - { host: api.coingecko.com, port: 443, beta_smoke: true }
     - { host: www.ecb.europa.eu, port: 443, beta_smoke: true }
     - { host: mainnet.neardata.xyz, port: 443, beta_smoke: true }
-    - { host: rpc.mainnet.near.org, port: 443 }
     - { host: free.rpc.fastnear.com, port: 443 }
+    - { host: near.drpc.org, port: 443 }
+    - { host: rpc.mainnet.near.org, port: 443 }
     - { host: mainnet.base.org, port: 443, note: "default EVM RPCs when NP_EVM_RPC_URLS_* are empty" }
     - { host: base-rpc.publicnode.com, port: 443 }
     - { host: arb1.arbitrum.io, port: 443 }
@@ -47,16 +50,18 @@ services:
     - { host: mempool.space, port: 443, note: "default when NP_BITCOIN_ESPLORA_URLS is empty" }
     - { host: blockstream.info, port: 443 }
   agentpay: # NEAR RPC (relayer batches to intents.near), 1Click
-    - { host: rpc.mainnet.near.org, port: 443 }
     - { host: free.rpc.fastnear.com, port: 443 }
+    - { host: near.drpc.org, port: 443 }
+    - { host: rpc.mainnet.near.org, port: 443 }
     - { host: 1click.chaindefuser.com, port: 443 }
   compliance: # OFAC SDN list, daily
     - { host: sanctionslistservice.ofac.treas.gov, port: 443, beta_smoke: true }
   notify: # Resend SMTP (implicit TLS)
     - { host: smtp.resend.com, port: 465, beta_smoke: true }
   sentinel: # independent re-verification: NEAR/EVM RPCs, 1Click deposit lookups
-    - { host: rpc.mainnet.near.org, port: 443 }
     - { host: free.rpc.fastnear.com, port: 443 }
+    - { host: near.drpc.org, port: 443 }
+    - { host: rpc.mainnet.near.org, port: 443 }
     - { host: 1click.chaindefuser.com, port: 443 }
     - { host: mainnet.base.org, port: 443 }
     - { host: base-rpc.publicnode.com, port: 443 }
@@ -65,8 +70,9 @@ services:
     - { host: eth.llamarpc.com, port: 443 }
     - { host: ethereum-rpc.publicnode.com, port: 443 }
   billing: # NEAR RPC: live vault views, keeper `collect` transactions
-    - { host: rpc.mainnet.near.org, port: 443 }
     - { host: free.rpc.fastnear.com, port: 443 }
+    - { host: near.drpc.org, port: 443 }
+    - { host: rpc.mainnet.near.org, port: 443 }
   webhooks-dispatcher: # via Smokescreen only: any public merchant URL on 80/443, never a private address
     - { host: "*", port: 443 }
 

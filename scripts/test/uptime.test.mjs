@@ -13,7 +13,7 @@ import * as autoheal from "../../compose/autoheal/autoheal.mjs";
 import { DEPLOY_ALERTS, create, expire, silenceBody } from "../lib/alertmanager-silence.mjs";
 import { checks, dockerAutoStart, parsePmset } from "../lib/doctor.mjs";
 import { LABELS, jobs, plist } from "../lib/launchd.mjs";
-import { OPTS, alertMessages, classifyPublic, containerFacts, decide, emptyState, summaryLines } from "../lib/watchdog.mjs";
+import { MONITORING_QUERIES, OPTS, alertMessages, classifyPublic, containerFacts, decide, emptyState, monitoringFacts, monitoringProblems, summaryLines } from "../lib/watchdog.mjs";
 
 const deploy = join(dirname(fileURLToPath(import.meta.url)), "../..");
 const read = (p) => readFileSync(join(deploy, p), "utf8");
@@ -174,6 +174,62 @@ test("watchdog: tunnel errors restart cloudflared; origin errors and no internet
   assert.equal(classifyPublic({ code: 0, expect: "200" }), "tunnel");
   assert.equal(classifyPublic({ code: 302, expect: "2xx3xx" }), "ok");
   assert.equal(classifyPublic({ code: 302, expect: "200" }), "origin");
+});
+
+test("watchdog: broken alerting (dead man's switch) → Telegram directly after 3 rounds, resolved when it works", () => {
+  const ok = { prometheus: true, alertmanager: true, alertmanagersDiscovered: 1, deliveryErrors: 0, ruleFailures: 0, telegramFailures: 0 };
+  assert.deepEqual(monitoringProblems(ok), []);
+  assert.deepEqual(monitoringProblems(undefined), []);
+  // unknown counters (no data yet) are not problems
+  assert.deepEqual(monitoringProblems({ prometheus: true, alertmanager: true, alertmanagersDiscovered: null, telegramFailures: null }), []);
+  assert.match(monitoringProblems({ ...ok, telegramFailures: 2 })[0], /Telegram messages fail: bot token/);
+  assert.match(monitoringProblems({ ...ok, alertmanagersDiscovered: 0 })[0], /cannot send alerts to Alertmanager/);
+  assert.match(monitoringProblems({ ...ok, deliveryErrors: 3 })[0], /cannot send alerts to Alertmanager/);
+  assert.match(monitoringProblems({ ...ok, ruleFailures: 1 })[0], /rules fail to evaluate/);
+  assert.equal(monitoringProblems({ prometheus: false, alertmanager: false }).length, 2);
+
+  const broken = { ...ok, alertmanager: false };
+  let t = facts().now;
+  let d = decide(facts({ monitoring: broken }), emptyState());
+  assert.deepEqual(d.firing, {});
+  assert.match(d.summary, /^degraded: .*alerting: Alertmanager does not answer$/);
+  assert.deepEqual(d.actions, []); // alert only, never heals the monitoring containers itself
+  for (let i = 1; i < OPTS.monitoringFailRuns; i++) d = decide(facts({ monitoring: broken, now: (t += MIN) }), d.state);
+  assert.match(d.firing.monitoring_down, /^Alerting is broken on the beta Mac.*Alertmanager does not answer \(scripts\/beta\.sh logs alertmanager\)/);
+  let m = alertMessages({}, d.firing, t);
+  assert.match(m.messages[0], /^ALERT: Alerting is broken/);
+  d = decide(facts({ monitoring: ok, now: (t += MIN) }), d.state);
+  assert.deepEqual(d.firing, {});
+  assert.equal(d.state.monitoringFail, 0);
+  m = alertMessages(m.alerts, d.firing, t);
+  assert.match(m.messages[0], /^RESOLVED: alerting works again/);
+  // a blip (Prometheus restarting for a round) does not alert
+  d = decide(facts({ monitoring: { ...ok, prometheus: false } }), emptyState());
+  d = decide(facts({ monitoring: ok, now: facts().now + MIN }), d.state);
+  d = decide(facts({ monitoring: { ...ok, prometheus: false }, now: facts().now + 2 * MIN }), d.state);
+  assert.deepEqual(d.firing, {});
+});
+
+test("watchdog: monitoring facts from Prometheus /-/ready, Alertmanager /api/v2/status and the delivery counters", async () => {
+  const values = { [MONITORING_QUERIES.alertmanagersDiscovered]: "1", [MONITORING_QUERIES.telegramFailures]: "4" };
+  const prom = createServer((req, res) => {
+    const u = new URL(req.url, "http://x");
+    if (u.pathname === "/-/ready") return res.writeHead(200).end("ready");
+    const v = values[u.searchParams.get("query")];
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify({ status: "success", data: { resultType: "vector", result: v === undefined ? [] : [{ metric: {}, value: [0, v] }] } }));
+  });
+  await new Promise((r) => prom.listen(0, "127.0.0.1", r));
+  const promUrl = `http://127.0.0.1:${prom.address().port}`;
+  try {
+    const m = await monitoringFacts(promUrl, "http://127.0.0.1:9");
+    assert.deepEqual(m, { prometheus: true, alertmanager: false, alertmanagersDiscovered: 1, deliveryErrors: null, ruleFailures: null, telegramFailures: 4 });
+    assert.equal(monitoringProblems(m).length, 2);
+    const down = await monitoringFacts("http://127.0.0.1:9", "http://127.0.0.1:9");
+    assert.deepEqual(down, { prometheus: false, alertmanager: false });
+  } finally {
+    await new Promise((r) => prom.close(r));
+  }
 });
 
 test("watchdog: Telegram once per problem, a reminder every 6 h, and a resolved message", () => {
