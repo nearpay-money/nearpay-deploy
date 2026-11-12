@@ -53,14 +53,38 @@ groups:
 
   - name: nearpay-money-path
     rules:
-      # sentinel: nearpay_sentinel_kill_switch_engaged (1 while live quoting is stopped)
+      # sentinel: nearpay_sentinel_kill_switch_engaged (1 while live quoting is stopped). Since ADR-0028 sentinel engages it
+      # by itself only on corroborated breaches across accounts (actor "sentinel", reason "systemic integrity breach…");
+      # otherwise an operator engaged it. Either way it stays on until ops release it in the console.
       - alert: KillSwitchEngaged
         expr: max(nearpay_sentinel_kill_switch_engaged) == 1
         labels: { severity: critical }
         annotations:
           summary: "Kill switch engaged: live payments are stopped"
-          description: "Sentinel reports the kill switch on; live quoting is refused until ops release it."
-          runbook: "Console (ops.nearpay.money) > Kill switch; scripts/beta.sh logs sentinel-api"
+          description: "Sentinel reports the kill switch on; live quoting is refused until ops release it. Actor sentinel = corroborated integrity breaches across merchants (a security event: find the cause before releasing); otherwise an operator engaged it. See who and why with the first command."
+          runbook: "scripts/beta.sh ops sentinel kill-switch; scripts/beta.sh ops sentinel integrity-breaches; release: Console (ops.nearpay.money) > Kill switch"
+
+      # sentinel: nearpay_sentinel_integrity_refusals_total{livemode,evidence,rule,address} — security refusals of deposit
+      # instructions. address="genuine" + evidence="pipeline": a quote for a deposit address NearPay issued disagrees with
+      # the provider's signature, NearPay's referral/treasury or identity's registry (ADR-0028). Sentinel refused that
+      # payment and quarantined the merchant (AccountQuarantined); other merchants keep working.
+      - alert: IntegrityBreachRefused
+        expr: sum by (rule) (increase(nearpay_sentinel_integrity_refusals_total{address="genuine", evidence="pipeline"}[15m])) > 0
+        labels: { severity: warning }
+        annotations:
+          summary: "Sentinel refused a NearPay quote that failed its integrity check ({{ $labels.rule }})"
+          description: "A deposit address NearPay issued came with a quote that failed {{ $labels.rule }} (R2 signature, R3 referral, R4 deposit address/lifetime, R5 recipient, R6 treasury fee). That payment was refused and its merchant quarantined; everyone else keeps working. Three such refusals across two merchants within 15 minutes stop live payments (KillSwitchEngaged)."
+          runbook: "scripts/beta.sh ops sentinel integrity-breaches; scripts/beta.sh logs sentinel-api | grep 'ALERT quote integrity breach'"
+
+      # sentinel: nearpay_sentinel_quarantines_active — merchants whose deposit instructions sentinel does not sign right now
+      # (a breach on one of their payments; expires after NP_QUARANTINE_TTL_S, default 30 min, unless ops extend or clear it).
+      - alert: AccountQuarantined
+        expr: max(nearpay_sentinel_quarantines_active) > 0
+        labels: { severity: warning }
+        annotations:
+          summary: "{{ $value | humanize }} merchant(s) quarantined by sentinel"
+          description: "Sentinel holds deposit instructions for these merchants after an integrity refusal (their payers see 'temporarily unavailable'). It clears by itself when the quarantine expires; clear it sooner once you know the refusal was not tampering."
+          runbook: "scripts/beta.sh ops sentinel quarantines; scripts/beta.sh ops sentinel quarantine-clear <acct_…> '<why>'"
 
       # rails: nearpay_rails_routing_available{livemode} (0 = every payment option is unavailable: the payer sees
       # "Payments are temporarily unavailable") and nearpay_rails_routing_blocked{livemode,reason} (1 per blocking
