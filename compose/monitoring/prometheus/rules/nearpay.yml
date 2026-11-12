@@ -88,32 +88,49 @@ groups:
 
       # sentinel: the same integrity rule failing for several merchants at once is far more likely a provider format change
       # (1Click /v0/status echo, quote deadline, appFees shape) or rails/sentinel config skew than an attack on each of
-      # them (audit 2026-11-12 SENTINEL-1). Two arms, either fires:
-      #   - nearpay_sentinel_integrity_drift_suspected (gauge, 1 while every pipeline breach in the corroboration window
-      #     has the same rule set and comes from >= 2 accounts) — ASSUMED NAME, added by the sentinel resilience branch;
-      #     absent = this arm never fires;
-      #   - from metrics sentinel exports today: exactly one rule (label of nearpay_sentinel_integrity_refusals_total) has
-      #     live pipeline refusals on genuine addresses in 15 min, and the corroboration window holds >= 2 accounts.
+      # them (audit 2026-11-12 SENTINEL-1). Two arms:
+      #   - nearpay_sentinel_integrity_drift_total{source,rules} (sentinel with the SENTINEL-1 fix; series pre-created at
+      #     0): source r2_only = a signature (R2) failure with every other rule passing, refused as unavailable;
+      #     pattern = breaches classed as drift (same rules on >= 2 accounts); engaged = a uniform systemic engagement;
+      #   - only when that metric is absent (older sentinel), from metrics exported since ADR-0028: exactly one rule (label
+      #     of nearpay_sentinel_integrity_refusals_total) has live pipeline refusals on genuine addresses in 15 min, and
+      #     the corroboration window holds >= 2 accounts.
       # It fires next to IntegrityBreachRefused / AccountQuarantined / KillSwitchEngaged, which still say what happened.
       - alert: IntegrityDriftSuspected
         expr: |
-          max(nearpay_sentinel_integrity_drift_suspected) == 1
-          or
+          sum by (source, rules) (increase(nearpay_sentinel_integrity_drift_total[15m])) > 0
+          or on()
           (
+            absent(nearpay_sentinel_integrity_drift_total)
+            and on()
             count(sum by (rule) (increase(nearpay_sentinel_integrity_refusals_total{livemode="true", address="genuine", evidence="pipeline"}[15m])) > 0) == 1
             and on() max(nearpay_sentinel_integrity_systemic_window{measure="accounts"}) >= 2
           )
         labels: { severity: critical }
         annotations:
-          summary: "The same integrity rule fails for several merchants: likely a provider format change or config skew"
+          summary: "Integrity drift suspected{{ if $labels.source }} ({{ $labels.source }}, {{ $labels.rules }}){{ end }}: likely a provider format change or config skew"
           description: |-
-            Failing rule(s) on live NearPay deposit addresses in the last 15 minutes: {{ range $i, $s := query `sum by (rule) (increase(nearpay_sentinel_integrity_refusals_total{livemode="true", address="genuine", evidence="pipeline"}[15m])) > 0` }}{{ if $i }}, {{ end }}{{ $s.Labels.rule }}{{ else }}see integrity-breaches{{ end }}; merchants in the corroboration window: {{ with query `max(nearpay_sentinel_integrity_systemic_window{measure="accounts"})` }}{{ . | first | value | humanize }}{{ else }}unknown{{ end }}. One rule on every merchant usually means 1Click changed a format (status echo for R2, quote deadline for R4, appFees for R6) or rails and sentinel run with different treasury/referral/fee settings after a partial deploy, not tampering. Merchants stay quarantined and the kill switch may engage until the cause is fixed.
+            Failing rule(s) on live NearPay deposit addresses in the last 15 minutes: {{ range $i, $s := query `sum by (rule) (increase(nearpay_sentinel_integrity_refusals_total{livemode="true", address="genuine", evidence="pipeline"}[15m])) > 0` }}{{ if $i }}, {{ end }}{{ $s.Labels.rule }}{{ else }}see integrity-breaches{{ end }}; merchants in the corroboration window: {{ with query `max(nearpay_sentinel_integrity_systemic_window{measure="accounts"})` }}{{ . | first | value | humanize }}{{ else }}unknown{{ end }}. {{ if eq $labels.source "r2_only" }}Sentinel could not verify 1Click's signature although every other check passed, and refused those payments as unavailable. {{ end }}One rule on every merchant usually means 1Click changed a format (status echo for R2, quote deadline for R4, appFees for R6) or rails and sentinel run with different treasury/referral/fee settings after a partial deploy, not tampering. Merchants stay quarantined and the kill switch may engage until the cause is fixed.
           runbook: "scripts/beta.sh ops sentinel integrity-breaches (compare the reasons with the 1Click changelog); compare NP_TREASURY_ACCOUNT / referral / fee settings of rails and sentinel (scripts/beta.sh up redeploys both); release the kill switch only after the fix (docs/beta-launch.md 'Releasing the kill switch')"
+
+      # sentinel and rails: nearpay_<svc>_fee_config_info{hash} = 1 for the fingerprint of the treasury / referral /
+      # provider-split configuration each runs with (SENTINEL-1 deploy-skew guard). Two fingerprints = a partial deploy:
+      # every live quote then fails sentinel's R6/R3 checks, quarantining every merchant (IntegrityDriftSuspected next).
+      # Sentinel exports it with the SENTINEL-1 fix; the rails name is ASSUMED NAME (same shape) until rails ships it.
+      - alert: FeeConfigSkew
+        expr: count(count by (hash) ({__name__=~"nearpay_(sentinel|rails)_fee_config_info"} == 1)) > 1
+        for: 5m
+        labels: { severity: critical }
+        annotations:
+          summary: "Rails and sentinel run with different treasury/referral/fee settings"
+          description: "Fingerprints: {{ range $i, $s := query `max by (service, hash) ({__name__=~\"nearpay_(sentinel|rails)_fee_config_info\"} == 1)` | sortByLabel \"service\" }}{{ if $i }}, {{ end }}{{ $s.Labels.service }} {{ $s.Labels.hash }}{{ end }}. Sentinel checks every live quote against its own settings, so quotes built with the other settings fail its integrity checks and merchants get quarantined."
+          runbook: "compare NP_TREASURY_ACCOUNT and the fee/referral settings in compose/env/*.env for rails and sentinel; scripts/beta.sh up (recreates both with the same settings)"
 
       # sentinel: nearpay_sentinel_attestations_total{kind,result,reason} — co-signing of deposit instructions. result
       # "unavailable" = sentinel could not verify (reason R1: 1Click /v0/status or its API key; registry: identity's
       # destination registry; asset: 1Click /v0/tokens; quarantined: the merchant is held; provider: 1Click not
-      # configured; checks: the quote could not be verified). Routing stays green, so LivePaymentsNotRouting does not
+      # configured; checks: the quote could not be verified; integrity_drift: refused as provider drift, SENTINEL-1).
+      # Routing stays green, so LivePaymentsNotRouting does not
       # fire, and beta traffic is far below ErrorSpike's threshold (audit SENTINEL-3). >= 3 in 10 min with no fresh
       # signature (a cached one does not count) = checkout is dead for payers.
       - alert: AttestationsFailing
@@ -124,7 +141,7 @@ groups:
         annotations:
           summary: "Sentinel cannot verify deposit instructions ({{ $labels.reason }}): payers cannot pay"
           description: |-
-            {{ $value | humanize }} co-signing request(s) answered "unavailable" ({{ $labels.reason }}) in 10 minutes and none was signed: payers see "Deposit instructions cannot be verified" although routing is fine. {{ if eq $labels.reason "R1" }}1Click /v0/status is unreachable or refuses sentinel's API key (expired or revoked key, egress).{{ else if eq $labels.reason "registry" }}Sentinel cannot read identity's destination registry in time (identity database, db_registry_url_sentinel).{{ else if eq $labels.reason "asset" }}The paid asset is missing from 1Click's /v0/tokens list (1Click tokens endpoint, egress).{{ else if eq $labels.reason "quarantined" }}The merchant is quarantined after an integrity refusal (AccountQuarantined).{{ else if eq $labels.reason "provider" }}Sentinel has no 1Click provider configured (NP_ONECLICK_BASE_URL, .secrets/live/oneclick_api_key).{{ else if eq $labels.reason "checks" }}The quote could not be verified (provider echo, unknown recipient): the attestation records say which check.{{ end }} It recovers by itself once the dependency answers.
+            {{ $value | humanize }} co-signing request(s) answered "unavailable" ({{ $labels.reason }}) in 10 minutes and none was signed: payers see "Deposit instructions cannot be verified" although routing is fine. {{ if eq $labels.reason "R1" }}1Click /v0/status is unreachable or refuses sentinel's API key (expired or revoked key, egress).{{ else if eq $labels.reason "registry" }}Sentinel cannot read identity's destination registry in time (identity database, db_registry_url_sentinel).{{ else if eq $labels.reason "asset" }}The paid asset is missing from 1Click's /v0/tokens list (1Click tokens endpoint, egress).{{ else if eq $labels.reason "quarantined" }}The merchant is quarantined after an integrity refusal (AccountQuarantined).{{ else if eq $labels.reason "provider" }}Sentinel has no 1Click provider configured (NP_ONECLICK_BASE_URL, .secrets/live/oneclick_api_key).{{ else if eq $labels.reason "checks" }}The quote could not be verified (provider echo, unknown recipient): the attestation records say which check.{{ else if eq $labels.reason "integrity_drift" }}Sentinel classed the failures as provider-wide drift (IntegrityDriftSuspected).{{ end }} It recovers by itself once the dependency answers.
           runbook: |-
             {{ if eq $labels.reason "quarantined" }}scripts/beta.sh ops sentinel quarantines{{ else if eq $labels.reason "registry" }}scripts/beta.sh logs sentinel-api | grep registry; scripts/beta.sh status (identity, postgres){{ else if eq $labels.reason "checks" }}scripts/beta.sh ops sentinel attestations <pa_… | deposit address>{{ else }}scripts/beta.sh logs sentinel-api | grep -i unavailable; scripts/beta.sh logs egress-proxy; key: .secrets/live/oneclick_api_key{{ end }}
 
@@ -132,10 +149,11 @@ groups:
       # evt.sentinel.kill_switch.* event (stopped consumer, dead letter, lost NATS state, stalled outbox). Arms:
       #   1. sentinel released, rails still blocks live routing on kill_switch_engaged (payments stay stopped after a release);
       #   2. sentinel engaged, rails routes live (not blocked on kill_switch_engaged nor kill_switch_unknown);
-      #   3. a copy's version differs from sentinel's: nearpay_{rails,payments}_kill_switch_version (or …_source_version)
-      #      vs nearpay_sentinel_kill_switch_version — ASSUMED NAMES, added by the rails/payments and sentinel resilience
-      #      branches; absent = this arm never fires. A copy AHEAD of sentinel (sentinel's database recreated) never
-      #      accepts sentinel's lower versions again, so != rather than <.
+      #   3. nearpay_{rails,payments}_kill_switch_diverged (1 when the copy still differs from sentinel after the last
+      #      periodic read was applied; rails/payments with the RAILS-1 / PAYMENTS-1 re-sync), e.g. a copy AHEAD of
+      #      sentinel (sentinel's database recreated) that never accepts sentinel's lower versions again. Absent on
+      #      older images: the arm never fires. Versions: …_kill_switch_version (the copy's; -1 unknown) and
+      #      …_kill_switch_source_version (sentinel's at the last read).
       # Arms 1 and 2 use metrics exported today. Rails re-reads sentinel at most every 60 s once the RAILS-1 re-sync ships.
       - alert: KillSwitchCopyDiverged
         expr: |
@@ -151,15 +169,14 @@ groups:
           )
           or
           (
-            max by (service) ({__name__=~"nearpay_(rails|payments)_kill_switch_(source_)?version"})
-            != on() group_left() max(nearpay_sentinel_kill_switch_version)
+            max by (service) ({__name__=~"nearpay_(rails|payments)_kill_switch_diverged"}) == 1
           )
         for: 3m
         labels: { severity: critical }
         annotations:
           summary: "{{ if $labels.service }}{{ $labels.service }}'s{{ else }}Rails'{{ end }} copy of the kill switch disagrees with sentinel"
           description: |-
-            Sentinel: {{ with query `max(nearpay_sentinel_kill_switch_engaged)` }}{{ if eq (. | first | value) 1.0 }}engaged{{ else }}released{{ end }}{{ else }}unknown{{ end }}{{ with query `max(nearpay_sentinel_kill_switch_version)` }} (version {{ . | first | value }}){{ end }}. Rails blocks live routing on the kill switch: {{ with query `max(nearpay_rails_routing_blocked{livemode="true", reason="kill_switch_engaged"})` }}{{ if eq (. | first | value) 1.0 }}yes{{ else }}no{{ end }}{{ else }}unknown{{ end }}{{ with query `max({__name__=~"nearpay_rails_kill_switch_(source_)?version"})` }} (rails copy version {{ . | first | value }}){{ end }}. The copy missed sentinel's last kill-switch event. If sentinel released and rails still blocks: payers stay stopped after the release. If sentinel engaged and rails routes: live payments go on although they were stopped — act now.
+            Sentinel: {{ with query `max(nearpay_sentinel_kill_switch_engaged)` }}{{ if eq (. | first | value) 1.0 }}engaged{{ else }}released{{ end }}{{ else }}unknown{{ end }}{{ with query `max(nearpay_rails_kill_switch_source_version) >= 0` }} (version {{ . | first | value }} at rails' last read){{ end }}. Rails blocks live routing on the kill switch: {{ with query `max(nearpay_rails_routing_blocked{livemode="true", reason="kill_switch_engaged"})` }}{{ if eq (. | first | value) 1.0 }}yes{{ else }}no{{ end }}{{ else }}unknown{{ end }}{{ with query `max(nearpay_rails_kill_switch_version) >= 0` }} (rails copy version {{ . | first | value }}){{ end }}. The copy missed sentinel's last kill-switch event. If sentinel released and rails still blocks: payers stay stopped after the release. If sentinel engaged and rails routes: live payments go on although they were stopped — act now.
           runbook: "scripts/beta.sh ops rails flags (quoting_enabled, source_version) vs scripts/beta.sh ops sentinel kill-switch (engaged, version); scripts/beta.sh logs rails-feeds (consumer); DeadLetters; emergency, after checking sentinel's state: scripts/beta.sh ops rails flag-set quoting_enabled <true|false> '<reason>' (docs/beta-launch.md 'Releasing the kill switch')"
 
       # rails: nearpay_rails_routing_available{livemode} (0 = every payment option is unavailable: the payer sees
@@ -203,21 +220,15 @@ groups:
           description: "The tracker has been more than 200 blocks behind its chain's head for 10 minutes. Payments that settle on that chain confirm late (\"confirming\"), and vault events reach billing late. Normal for a while after the Mac slept; it should shrink."
           runbook: "scripts/beta.sh logs rails-tracker | grep -i -E 'behind|ALERT'; NEAR: scripts/beta.sh logs egress-proxy (mainnet.neardata.xyz); EVM: the chain's RPC (NP_EVM_RPC_URLS_*)"
 
-      # rails / sentinel: nearpay_<svc>_oneclick_key_expiry_seconds — the `exp` of the 1Click API key when it is a JWT
-      # (.secrets/live/oneclick_api_key; no series for a non-JWT key) — ASSUMED NAME, added by the sentinel (and rails)
-      # resilience branches; absent = never fires. Read either as a Unix timestamp (> 1e9) or as seconds left, whichever
-      # the exporter chose; the alert value is always the seconds left. An expired key stops quoting (rails) and every
-      # attestation (sentinel: AttestationsFailing R1).
+      # sentinel (and rails, if it exports the same): nearpay_<svc>_oneclick_key_expiry_seconds{mode} — Unix time of the
+      # `exp` of the 1Click API key when it is a JWT (.secrets/live/oneclick_api_key; no series for a non-JWT key or an
+      # older image). The alert value is the seconds left. An expired key stops quoting (rails) and every attestation
+      # (sentinel: AttestationsFailing R1).
       - alert: OneClickKeyExpiring
-        expr: |
-          (
-            (min by (service) ({__name__=~"nearpay_.+_oneclick_key_expiry_seconds"}) > 1e9) - time()
-            or
-            min by (service) ({__name__=~"nearpay_.+_oneclick_key_expiry_seconds"}) <= 1e9
-          ) < 7 * 86400
+        expr: min by (service, mode) ({__name__=~"nearpay_.+_oneclick_key_expiry_seconds"}) - time() < 7 * 86400
         labels: { severity: warning }
         annotations:
-          summary: "{{ $labels.service }}: the 1Click API key expires in {{ $value | humanizeDuration }}"
+          summary: "{{ $labels.service }}: the 1Click API key{{ if $labels.mode }} ({{ $labels.mode }}){{ end }} expires in {{ $value | humanizeDuration }}"
           description: "When the key expires (a negative time means it already has), 1Click refuses rails' quotes and sentinel's status checks: no live payment can be made."
           runbook: "get a new key from 1Click, write it to .secrets/live/oneclick_api_key, scripts/beta.sh up (rails and sentinel read the same file)"
 
@@ -258,8 +269,8 @@ groups:
           runbook: "scripts/beta.sh logs {{ $labels.service }}-worker"
 
       # kit: nearpay_<svc>_consumer_lag_messages{durable} (pending + unacknowledged messages of a NATS durable consumer)
-      # and nearpay_<svc>_consumer_running{durable} (1 while the consume loop runs) — the latter an ASSUMED NAME from
-      # the kit resilience branch (KIT-1); absent = only the lag arm. A consume loop that ended leaves the process
+      # and nearpay_<svc>_consumer_running{durable} (1 while the supervised consume loop runs; kit with the KIT-1 fix,
+      # absent before: only the lag arm). A consume loop that ended leaves the process
       # healthy while its events pile up (rails: kill-switch events; webhooks: deliveries; compliance: cases).
       - alert: ConsumerLagHigh
         expr: |
@@ -273,8 +284,8 @@ groups:
           description: "For 10 minutes messages have waited for this durable consumer (or its consume loop has stopped). Events it handles are not applied; for rails that includes the kill switch (KillSwitchCopyDiverged)."
           runbook: "scripts/beta.sh logs {{ $labels.service }}-<process> | grep -i -E 'consumer|background error' (the process that consumes {{ $labels.durable }}); restart it: docker restart nearpay-beta-{{ $labels.service }}-<process>-1; scripts/beta.sh logs nats"
 
-      # kit: nearpay_<svc>_http_breaker_open{target} (1 while the outbound circuit breaker refuses calls) — ASSUMED NAME
-      # from the kit resilience branch (KIT-2). Second arm, from metrics exported today
+      # kit: nearpay_<svc>_http_breaker_open{target} (1 while the breaker is open or half-open; kit with the KIT-2 fix,
+      # absent before). Second arm, from metrics every kit exports
       # (nearpay_<svc>_external_calls_total{target,outcome}): the breaker refused calls for 5 min and not one call
       # reached the target (no probe), which is the stuck half-open breaker that only a restart cures (payments → rails
       # stops every payment creation; rails → 1Click every quote).

@@ -17,6 +17,7 @@ const RESILIENCE = {
   AttestationsFailing: "critical",
   KillSwitchCopyDiverged: "critical",
   IntegrityDriftSuspected: "critical",
+  FeeConfigSkew: "critical",
   TrackerLagging: "warning",
   OneClickKeyExpiring: "warning",
   ConsumerLagHigh: "critical",
@@ -48,20 +49,23 @@ test("resilience alerts: expressions on the audited metrics; assumed metrics onl
   const expr = (n) => block(rules, n).split(/\n\s+labels:/)[0];
   assert.match(expr("AttestationsFailing"), /nearpay_sentinel_attestations_total\{result="unavailable"\}\[10m\]\)\) >= 3\n\s+unless on\(\) sum\(increase\(nearpay_sentinel_attestations_total\{result="signed", reason="ok"\}/);
   assert.match(expr("KillSwitchCopyDiverged"), /max\(nearpay_sentinel_kill_switch_engaged\) == 0\n\s+and on\(\) max\(nearpay_rails_routing_blocked\{livemode="true", reason="kill_switch_engaged"\}\) == 1/);
-  assert.match(expr("KillSwitchCopyDiverged"), /!= on\(\) group_left\(\) max\(nearpay_sentinel_kill_switch_version\)/);
+  assert.match(expr("KillSwitchCopyDiverged"), /max by \(service\) \(\{__name__=~"nearpay_\(rails\|payments\)_kill_switch_diverged"\}\) == 1/);
   assert.match(block(rules, "KillSwitchCopyDiverged"), /for: 3m/);
   assert.match(expr("TrackerLagging"), /max by \(tracker\) \(nearpay_rails_tracker_lag_blocks\) > 200\n\s+for: 10m/);
   assert.match(expr("ConsumerLagHigh"), /nearpay_\.\+_consumer_lag_messages"\}\) > 0/);
   assert.match(expr("HttpBreakerOpen"), /nearpay_\.\+_http_breaker_open/);
   assert.match(expr("HttpBreakerOpen"), /nearpay_\.\+_external_calls_total", outcome="breaker_open"/);
-  assert.match(expr("OneClickKeyExpiring"), /< 7 \* 86400/);
-  assert.match(expr("IntegrityDriftSuspected"), /max\(nearpay_sentinel_integrity_drift_suspected\) == 1/);
-  // no absent(): a metric an older image does not export must never page
-  for (const n of Object.keys(RESILIENCE)) assert.doesNotMatch(expr(n), /absent\(/, n);
-  // every metric a parallel branch adds is marked, so it can be reconciled
+  assert.match(expr("OneClickKeyExpiring"), /oneclick_key_expiry_seconds"\}\) - time\(\) < 7 \* 86400/);
+  assert.match(expr("IntegrityDriftSuspected"), /sum by \(source, rules\) \(increase\(nearpay_sentinel_integrity_drift_total\[15m\]\)\) > 0/);
+  assert.match(expr("FeeConfigSkew"), /count\(count by \(hash\) \(\{__name__=~"nearpay_\(sentinel\|rails\)_fee_config_info"\} == 1\)\) > 1/);
+  // absent() only to gate the drift fallback to older sentinels; a metric an older image lacks must never page by itself
+  for (const n of Object.keys(RESILIENCE)) {
+    if (n === "IntegrityDriftSuspected") assert.match(expr(n), /absent\(nearpay_sentinel_integrity_drift_total\)\n\s+and on\(\)/);
+    else assert.doesNotMatch(expr(n), /absent\(/, n);
+  }
+  // a metric no branch exports yet is marked, so it can be reconciled
   const comments = rules.match(/(?:^[ \t]*#.*\n)+/gm) ?? []; // runs of consecutive comment lines
-  for (const m of ["nearpay_sentinel_integrity_drift_suspected", "kill_switch_version", "oneclick_key_expiry_seconds", "consumer_running", "http_breaker_open"])
-    assert.ok(comments.some((c) => c.includes(m) && c.includes("ASSUMED NAME")), `${m} is not marked ASSUMED NAME`);
+  assert.ok(comments.some((c) => c.includes("fee_config_info") && c.includes("ASSUMED NAME")), "rails fee_config_info is not marked ASSUMED NAME");
 });
 
 test("kill-switch hints: the console release with its single-operator steps, never the CLI release", () => {

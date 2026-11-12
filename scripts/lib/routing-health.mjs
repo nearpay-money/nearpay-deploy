@@ -14,8 +14,8 @@
 // either the single-operator release walkthrough (sentinel engaged) or "rails missed the release" (sentinel released,
 // rails' copy still engaged; audit 2026-11-12 RAILS-1). Versions come from `beta.sh ops sentinel kill-switch` /
 // `beta.sh ops rails flags` output (--ops-* files, written by `scripts/beta.sh routing`) or else from Prometheus:
-// nearpay_sentinel_kill_switch_engaged, and nearpay_sentinel_kill_switch_version / nearpay_rails_kill_switch_version
-// (or …_source_version), which newer sentinel/rails images export.
+// nearpay_sentinel_kill_switch_engaged, and (rails with the RAILS-1 re-sync) nearpay_rails_kill_switch_source_version
+// (sentinel's version at rails' last read) / nearpay_rails_kill_switch_version (the copy's).
 import { readFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 import { parseArgs } from "node:util";
@@ -49,8 +49,9 @@ export const QUERIES = {
   blocked: 'max by (reason) (nearpay_rails_routing_blocked{livemode="true"}) == 1',
   registryAge: 'max(nearpay_rails_token_registry_age_seconds{livemode="true"})',
   sentinelEngaged: "max(nearpay_sentinel_kill_switch_engaged)",
-  sentinelVersion: "max(nearpay_sentinel_kill_switch_version)",
-  railsVersion: 'max({__name__=~"nearpay_rails_kill_switch_(source_)?version"})',
+  // rails with the RAILS-1 re-sync: sentinel's version at rails' last read, and the version rails' copy came from (-1 unknown)
+  sentinelVersion: "max(nearpay_rails_kill_switch_source_version) >= 0",
+  railsVersion: "max(nearpay_rails_kill_switch_version) >= 0",
 };
 
 /** The single-operator release in the console (sentinel two-person.ts: 5 min delay, step-up, reason >= 20 chars). */
