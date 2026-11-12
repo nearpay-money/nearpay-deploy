@@ -108,6 +108,19 @@ test("the alert rules and the runbook cover every reason", () => {
   }
 });
 
+test("integrity containment alerts (ADR-0028): breach and quarantine are warnings, the kill switch stays critical", () => {
+  const rules = readFileSync(join(deploy, "compose/monitoring/prometheus/rules/nearpay.yml"), "utf8");
+  assert.match(rules, /alert: KillSwitchEngaged\n\s+expr: max\(nearpay_sentinel_kill_switch_engaged\) == 1\n\s+labels: \{ severity: critical \}/);
+  assert.match(
+    rules,
+    /alert: IntegrityBreachRefused\n\s+expr: sum by \(rule\) \(increase\(nearpay_sentinel_integrity_refusals_total\{address="genuine", evidence="pipeline"\}\[15m\]\)\) > 0\n\s+labels: \{ severity: warning \}/,
+  );
+  assert.match(rules, /alert: AccountQuarantined\n\s+expr: max\(nearpay_sentinel_quarantines_active\) > 0\n\s+labels: \{ severity: warning \}/);
+  const runbook = readFileSync(join(deploy, "docs/beta-launch.md"), "utf8");
+  for (const a of ["KillSwitchEngaged", "IntegrityBreachRefused", "AccountQuarantined"]) assert.ok(runbook.includes(`| ${a}`), a);
+  assert.ok(runbook.includes("quarantine-clear"));
+});
+
 test("critical and warning alerts reach the owner's Telegram receiver", () => {
   const am = readFileSync(join(deploy, "compose/monitoring/alertmanager/alertmanager.yml.tmpl"), "utf8");
   assert.match(am, /^route:\n {2}receiver: owner-telegram\n/m);
