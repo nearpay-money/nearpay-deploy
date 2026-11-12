@@ -3,7 +3,7 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -143,6 +143,17 @@ test("ping fails on a closed port and the CLI refuses a registry that is not loc
   assert.throws(() => localRegistry("https://registry.npmjs.org"), /only a local registry/);
   assert.equal(localRegistry("http://127.0.0.1:4873"), "http://127.0.0.1:4873");
   await assert.rejects(run(process.execPath, [lib, "status", "https://registry.npmjs.org", join(deploy, "registry-seed")]), /only a local registry/);
+});
+
+test("the CLI also runs from a checkout reached through a symlink (macOS /tmp)", async () => {
+  const link = join(tmp, "deploy-link");
+  symlinkSync(deploy, link);
+  const server = createServer();
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const { port } = server.address();
+  await new Promise((resolve) => server.close(resolve));
+  // a no-op main would exit 0 here, and registry.sh would take the closed port for a running registry
+  await assert.rejects(run(process.execPath, [join(link, "scripts/lib/registry-local.mjs"), "ping", `http://127.0.0.1:${port}`]), (err) => err.code === 1);
 });
 
 test("spawn starts a process that outlives its parent and logs to the file", async () => {

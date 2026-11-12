@@ -11,7 +11,7 @@
  */
 import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, openSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, openSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 
@@ -150,7 +150,10 @@ async function main([cmd, ...args]) {
   }
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+// Run as a program (not imported by a test). Node resolves symlinks for import.meta.url but not for argv[1], so
+// compare real paths: a checkout under a symlinked directory (macOS /tmp) must not turn every command into a no-op.
+const invoked = process.argv[1] && existsSync(process.argv[1]) ? pathToFileURL(realpathSync(process.argv[1])).href : "";
+if (import.meta.url === invoked) {
   main(process.argv.slice(2)).catch((err) => {
     console.error(`registry: ${err.message}`);
     process.exit(1);

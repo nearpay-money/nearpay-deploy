@@ -23,6 +23,43 @@ This repo stays surgical: design docs live in [`nearpay-brain`](../nearpay-brain
 - `nearpay-brain/architecture/infrastructure.md`
 - `nearpay-brain/operations/runbooks.md`
 
+## Local package registry
+
+Every NearPay repository installs `@nearpay-money/*` and `@nearpay-internal/*` from a registry on your machine,
+`http://127.0.0.1:4873` (see the `.npmrc` in each repository); everything else comes from npmjs. One command starts
+that registry, without Docker:
+
+```sh
+git clone https://github.com/nearpay-money/nearpay-deploy
+nearpay-deploy/scripts/registry.sh
+# registry: up on http://127.0.0.1:4873 (24 packages, 122 versions)
+
+cd nearpay-node        # or any other NearPay repository
+pnpm install --frozen-lockfile
+```
+
+It needs Node.js 22 and nothing else. The first run takes one to two minutes: it installs Verdaccio 6.10.6 from npm
+into `.registry/` (git-ignored) and publishes the tarballs in `registry-seed/`, byte for byte the versions the
+lockfiles pin. Later runs answer at once. `scripts/registry.sh status` says whether it is up and complete,
+`scripts/registry.sh stop` stops it (the packages stay in `.registry/`), `NP_REGISTRY_PORT` moves it to another port.
+
+The Compose stack runs the same Verdaccio version and config as its `registry` service. When that one is already
+listening, `scripts/registry.sh` only reports it; `scripts/up.sh` stops the Docker-free one first, because both use
+port 4873.
+
+In GitHub Actions, the composite action in `.github/actions/registry` runs the same script on the runner:
+
+```yaml
+- uses: actions/setup-node@v4
+  with:
+    node-version-file: .nvmrc
+- uses: nearpay-money/nearpay-deploy/.github/actions/registry@main
+- run: pnpm install --frozen-lockfile
+```
+
+A later `docker build` that installs from the registry needs `--network host`, so that the build reaches the
+runner's `127.0.0.1`.
+
 ## Layout
 
 ```
@@ -44,15 +81,17 @@ nearpay-deploy/
 │   └── registry/config.yaml    Verdaccio for @nearpay-money/* and @nearpay-internal/*
 ├── scripts/
 │   ├── up.sh                   keys → registry seed + publish if missing → build web apps → build images → start, wait healthy
+│   ├── registry.sh             the package registry alone, without Docker (start, stop, status)
 │   ├── down.sh                 stop (add --volumes to delete local data)
 │   ├── beta.sh                 the closed beta: guided preflight, up, down, status, logs, smoke, telegram, ops
 │   ├── seed.sh                 keys: test-only secrets and TLS certificate into .secrets/ (git-ignored)
 │   ├── live-setup.mjs          one-time mainnet on-chain setup (relayer keys, agent Intents deposit); dry run by default
 │   ├── live-setup/             its code, tests and pinned @near-js/* dependencies (own package.json + pnpm lockfile)
-│   └── lib/                    seed-keys.mjs, registry-seed.mjs
-├── registry-seed/              exact @nearpay* tarballs the lockfiles resolve to (published by up.sh)
+│   └── lib/                    seed-keys.mjs, registry-seed.mjs, registry-local.mjs
+├── registry-seed/              exact @nearpay* tarballs the lockfiles resolve to (published by up.sh and registry.sh)
 ├── docs/beta-launch.md          owner runbook for the beta (Cloudflare, Resend, Telegram, UptimeRobot, first start)
 ├── apps/ charts/ envs/ platform/ secrets/   post-v1 GitOps layout (empty until then)
+├── .github/actions/registry/   composite action: scripts/registry.sh on a GitHub runner, for the other repositories' CI
 └── .github/workflows/ci.yml
 ```
 
@@ -63,6 +102,7 @@ nearpay-deploy/
 | `scripts/up.sh local`         | Start everything that is built; `--no-build` skips image builds, `--build-sites` forces web-app builds |
 | `scripts/beta.sh up`          | The closed beta at nearpay.money (owner's Mac; `docs/beta-launch.md`): preflight, build from the sibling mains, start, smoke test. Also `down`, `status`, `logs <svc>`, `smoke`, `telegram`, `ops <svc> <cmd>` |
 | `scripts/down.sh`             | Stop the stack; `--volumes` also deletes Postgres, NATS, Valkey and registry data                 |
+| `scripts/registry.sh`         | Only the package registry, without Docker (see "Local package registry"); also `stop`, `status`   |
 | `scripts/seed.sh data`        | Demo merchant (test mode), merchant-demo key + webhook endpoint, demo agent funded in the sandbox, billing catalogue (product, prices incl. an auto-debit USDC monthly price, tax rate, customer → `.secrets/demo-billing.json`) |
 | `scripts/seed.sh live`        | Check owner-provided mainnet credentials in `.secrets/live/` and generate the overlay `up.sh` uses |
 | `scripts/seed.sh keys`        | Create missing test-only secrets; `--renew-tls` regenerates the certificate (e.g. after mkcert)   |
@@ -76,6 +116,7 @@ nearpay-deploy/
 **Registry.** `up.sh` starts Verdaccio, then publishes every tarball in `registry-seed/` byte for byte (the exact
 versions the lockfiles resolve to, checked against `SHA512SUMS`), and builds `nearpay-spec`, `nearpay-kit`,
 `nearpay-node` and `nearpay-agentkit` from source only for versions still missing. See `registry-seed/README.md`.
+`scripts/registry.sh` runs the same registry without Docker and publishes the same seed (nothing from source).
 
 **Web apps.** nginx serves `nearpay-checkout/dist` (pay), `nearpay-dashboard/dist` and `nearpay-js/dist` (`/v1/nearpay.js`)
 from the sibling repositories. `up.sh` runs `pnpm install --frozen-lockfile && pnpm build` in each one whose output is
