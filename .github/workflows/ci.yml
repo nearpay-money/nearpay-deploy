@@ -40,6 +40,15 @@ jobs:
             -f compose/compose.local.yaml -f .secrets/live/compose.live.yaml -f compose/compose.beta.yaml \
             --env-file compose/env/local.env --env-file compose/env/beta.env --env-file .secrets/public/keys.env \
             --profile '*' config --quiet
+      # promtool of the beta's Prometheus image (compose.beta.yaml prom/prometheus:v3.5.3), checksum-pinned: the alert-rule
+      # tests run `promtool check rules` and the rule unit tests (scripts/test/promtool/) with it
+      - name: promtool
+        run: |
+          v=3.5.3
+          curl -fsSL -o /tmp/prometheus.tgz "https://github.com/prometheus/prometheus/releases/download/v$v/prometheus-$v.linux-amd64.tar.gz"
+          echo "8c30b9d99664e39b0363c0ba54fab30a7958e9d3de27246bf26ed85e6cfb8946  /tmp/prometheus.tgz" | sha256sum -c -
+          tar -xzf /tmp/prometheus.tgz -C /tmp --strip-components=1 "prometheus-$v.linux-amd64/promtool"
+          echo "PROMTOOL=/tmp/promtool" >> "$GITHUB_ENV"
       # after the Compose steps: the uptime tests also check the merged beta configuration (seeded keys, placeholders)
       - name: Deploy script tests (routing-health smoke, alert rules, uptime, runbook)
         run: node --test --test-reporter=spec scripts/test/*.test.mjs

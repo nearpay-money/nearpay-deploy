@@ -281,7 +281,7 @@ and you hear about anything that cannot. Three layers do that:
 |---|---|---|---|
 | Docker (`restart: unless-stopped`) | each container's process | restarts a container whose process exits; restarts every container when Docker Desktop starts | — |
 | **autoheal** (a container in the stack) | each container's health check | restarts a container that stays **unhealthy** (Docker never does): after ~3 min of failed checks, then with backoff 2, 4, 8, 16, 30 min, at most 3 restarts per 10 min. When many are unhealthy at once the Mac is overloaded: it holds back (restarting would add load). Postgres is left to you | Telegram via Alertmanager: `ContainerAutoHealed`, `ContainerUnhealthy`, `AutohealHeld`, `AutohealDown` |
-| **watchdog** (launchd, every minute) | Docker Desktop, stopped or missing containers, the public URLs through Cloudflare | opens Docker Desktop; `docker start` for a stopped service; `scripts/beta.sh up --no-pull` when containers are missing (at most every 15 min); restarts `cloudflared` when every URL fails with a tunnel error | Telegram directly (works even when Alertmanager is down): once when a problem starts, every 6 h while it lasts, once when it clears |
+| **watchdog** (launchd, every minute) | Docker Desktop, stopped or missing containers, the public URLs through Cloudflare, and alerting itself (Prometheus, Alertmanager, delivery to Telegram) | opens Docker Desktop; `docker start` for a stopped service; `scripts/beta.sh up --no-pull` when containers are missing (at most every 15 min); restarts `cloudflared` when every URL fails with a tunnel error | Telegram directly (works even when Alertmanager is down): once when a problem starts, every 6 h while it lasts, once when it clears |
 | **UptimeRobot** (cloud) | the five public URLs from outside | — | Telegram or email/app: the Mac is off, asleep or offline |
 
 Also automatic now:
@@ -361,6 +361,7 @@ Also automatic now:
 | watchdog: these containers keep stopping | a service exits right after starting | `scripts/beta.sh logs <name>` (a missing secret, config or database error) |
 | watchdog: public URLs fail | Cloudflare cannot reach the stack; on tunnel errors (530) the watchdog restarts cloudflared | `scripts/beta.sh logs cloudflared`; a 503 on the API = identity not ready: `scripts/beta.sh logs identity-api` |
 | watchdog: the Mac cannot reach the internet | router, Wi-Fi or ISP | fix the connection; everything resumes by itself |
+| watchdog: alerting is broken | for 3 minutes Prometheus was not ready, Alertmanager did not answer, Prometheus could not deliver alerts to Alertmanager, rules failed to evaluate, or Alertmanager's Telegram messages failed. Alerts such as KillSwitchEngaged may not reach you meanwhile | the message names the part and its log (`scripts/beta.sh logs prometheus` / `alertmanager`); Telegram failing = bot token or chat (`scripts/beta.sh telegram`) or `api.telegram.org` unreachable. Until fixed, check `scripts/beta.sh status` and `scripts/beta.sh routing` yourself. If the bot token itself is bad the watchdog cannot message you either: Healthchecks.io (step 7) gets a `/fail` ping while any watchdog problem lasts |
 | UptimeRobot / Healthchecks.io: down | the Mac is off, asleep, offline or signed out | go to the Mac: power, lid, network, sign in; then `scripts/beta.sh status` |
 
 To work on the stack without the watchdog interfering: `scripts/beta.sh watchdog pause 30` (minutes; it still checks
@@ -392,14 +393,21 @@ Each message says what is wrong, where, since when, and a first command to try. 
 |---|---|
 | ServiceDown / PlatformComponentDown | `scripts/beta.sh status`, then `scripts/beta.sh logs <container>`; `scripts/beta.sh up` restarts what is missing |
 | ErrorSpike / EdgeErrorSpike | `scripts/beta.sh logs <service>-api`; Grafana → Requests |
-| KillSwitchEngaged | live payments are stopped: `scripts/beta.sh ops sentinel kill-switch` shows who and why. Actor `sentinel` (reason "systemic integrity breach …") means integrity refusals on payments of **several merchants** within 15 minutes — a security event: read `scripts/beta.sh ops sentinel integrity-breaches` (which rule: R2 signature, R3 referral, R4 deposit address, R5 recipient, R6 treasury fee), fix the cause (e.g. a changed `NP_TREASURY_ACCOUNT` or referral), then release it in the console (**Kill switch**). One refusal never stops live payments (ADR-0028) |
+| KillSwitchEngaged | live payments are stopped: `scripts/beta.sh ops sentinel kill-switch` shows who and why. Actor `sentinel` (reason "systemic integrity breach …") means integrity refusals on payments of **several merchants** within 15 minutes — a security event: read `scripts/beta.sh ops sentinel integrity-breaches` (which rule: R2 signature, R3 referral, R4 deposit address, R5 recipient, R6 treasury fee), fix the cause (e.g. a changed `NP_TREASURY_ACCOUNT` or referral), then release it in the console: see "Releasing the kill switch" below. One refusal never stops live payments (ADR-0028) |
 | IntegrityBreachRefused (warning) | sentinel refused one payment whose quote failed an integrity check and quarantined that merchant only: `scripts/beta.sh ops sentinel integrity-breaches` (full detail: rule, reasons, deposit address, execution, account) |
 | AccountQuarantined (warning) | a merchant's payments are held after an integrity refusal (their payers see "temporarily unavailable"); it lifts by itself after 30 minutes. `scripts/beta.sh ops sentinel quarantines`; once you know it was not tampering: `scripts/beta.sh ops sentinel quarantine-clear <acct_…> "<why>"`; to keep holding: `scripts/beta.sh ops sentinel quarantine-extend <acct_…> <minutes> "<why>"` |
+| IntegrityDriftSuspected | the same integrity rule fails on payments of **several merchants**: much more likely 1Click changed a format (status echo → R2, quote deadline → R4, appFees → R6) or rails and sentinel run with different treasury/referral/fee settings after a partial deploy than tampering with each merchant. `scripts/beta.sh ops sentinel integrity-breaches` (compare the reasons with the 1Click changelog); redeploy with `scripts/beta.sh up` if settings differ; release the kill switch only after the fix |
+| AttestationsFailing | sentinel answers "unavailable" to every request to co-sign deposit instructions, so payers see "Deposit instructions cannot be verified" while routing looks fine. The reason in the message says where: `R1` = 1Click `/v0/status` or sentinel's 1Click key (expired, revoked, egress); `registry` = identity's destination registry (identity database); `asset` = 1Click `/v0/tokens`; `quarantined` = `scripts/beta.sh ops sentinel quarantines`; `checks` = `scripts/beta.sh ops sentinel attestations <pa_…>`. It recovers by itself when the dependency answers |
+| KillSwitchCopyDiverged | rails' (or payments') copy of the kill switch disagrees with sentinel for 3 minutes: it missed a kill-switch event (stopped consumer, dead letter, lost NATS state). Compare `scripts/beta.sh ops rails flags` (`quoting_enabled`, `source_version`) with `scripts/beta.sh ops sentinel kill-switch` (`engaged`, `version`). Sentinel released but rails still blocks: see "Rails missed the release" below. Sentinel engaged but rails still routes live payments: act now — `scripts/beta.sh ops rails flag-set quoting_enabled false "<reason>"` |
 | LivePaymentsNotRouting | every live payment option is unavailable (payers see "Payments are temporarily unavailable"): the message lists the reasons; see "Payments are temporarily unavailable" below |
 | TokenRegistryStale | rails cannot load the token list from 1Click: `scripts/beta.sh logs rails-feeds \| grep 'ALERT token_registry_refresh_failed'`, then `scripts/beta.sh logs egress-proxy` |
+| TrackerLagging (warning) | a rails tracker is more than 200 blocks behind its chain for 10 minutes (normal for a while after the Mac slept): payments settling on that chain confirm late. `scripts/beta.sh logs rails-tracker`; NEAR: `scripts/beta.sh logs egress-proxy` (neardata); it should shrink |
+| OneClickKeyExpiring (warning) | the 1Click API key (a JWT) expires within 7 days; when it does, quotes and attestations stop. Get a new key from 1Click, write it to `.secrets/live/oneclick_api_key`, `scripts/beta.sh up` |
 | ReconciliationDifference, QuoteIntegrityFailure | money-path checks: stop and look (`logs payments-worker` / `logs rails-api`) before anything else |
 | FinalityRecheckFailed | a payment confirmed on one block (EVM incl. Ethereum, Solana `confirmed`, Bitcoin 1 confirmation) was contradicted at finality — EVM `finalized` (2 h), Solana `finalized` (30 min), Bitcoin 6 confirmations (6 h) — or not final in that window; it still shows succeeded: `logs rails-tracker` (`ALERT finalized re-check`), open the execution's evidence trail in the console, hold delivery until checked |
 | OutboxBacklog, DeadLetters, WebhookBacklog | a service or NATS is stuck: `logs` of the service named, then `scripts/beta.sh up` |
+| ConsumerLagHigh | an event consumer has not processed its messages for 10 minutes (or its loop stopped) while the process looks healthy. `scripts/beta.sh logs <service>-<process>`, then `docker restart` that container; `scripts/beta.sh logs nats`. For rails this is how the kill switch goes stale (KillSwitchCopyDiverged) |
+| HttpBreakerOpen | a service's circuit breaker towards another service (or 1Click) has refused calls for 2 minutes. If the target is down, fix that first (`scripts/beta.sh status`); if it is up, the breaker is stuck: `docker restart` the calling container (e.g. `nearpay-beta-payments-api-1` when payments → rails) |
 | KeeperCollectFailed, KeeperStuck, VaultEventsRejected | auto-debit collections: `logs billing-worker`; check the keeper account has NEAR for gas |
 | EmailCapLow, EmailCapped, EmailFailures | Resend dashboard → Usage / Logs; `logs notify-worker` |
 | DiskLow, DiskCritical | `docker system df`, `docker image prune`, `docker builder prune`; raise Docker Desktop's disk limit |
@@ -419,7 +427,7 @@ scripts/beta.sh ops rails routing-health live    # straight from rails: reasons,
 
 | Reason | What it means | Fix |
 |---|---|---|
-| `kill_switch_engaged` | sentinel's kill switch stops live payments on purpose | find out why (`scripts/beta.sh logs sentinel-api`, console audit log), then release it in the console (**Kill switch**) |
+| `kill_switch_engaged` | sentinel's kill switch stops live payments on purpose (or rails missed its release) | `scripts/beta.sh routing` prints sentinel's state and version next to rails' copy. Sentinel engaged: find out why (`scripts/beta.sh ops sentinel kill-switch`, console audit log), then see "Releasing the kill switch" below. Sentinel released: see "Rails missed the release" below |
 | `kill_switch_unknown` | rails could not read the kill switch from sentinel, so it refuses live payments (fail closed) | `scripts/beta.sh logs rails-api \| grep 'ALERT kill_switch_unknown'`: `cause` says why (`auth` = rails' service token refused, `network:*`/`timeout` = sentinel unreachable, `sentinel_url_unset`); check `sentinel-api` is up. It clears by itself within 10 s of sentinel answering |
 | `treasury_unset` | `NP_TREASURY_ACCOUNT` (NearPay's live fee recipient) is not configured | set it in `compose/env/local.env` (mainnet checklist C.1), then `scripts/beta.sh up` |
 | `cross_chain_paused` | an operator paused cross-chain routes (control flag) | `scripts/beta.sh ops rails flag-set cross_chain_enabled true "resume: <why>"` |
@@ -431,6 +439,44 @@ scripts/beta.sh ops rails routing-health live    # straight from rails: reasons,
 | `token_registry_stale` (warning) | the token list has not refreshed for 90 s; prices go stale (and payments stop) after 5 minutes | as for `settlement_price_stale` |
 
 The price checks are never relaxed to get payments going again: fix the feed, not the rule.
+
+### Releasing the kill switch
+
+While you are the only operator (`ops_admin`), you release the kill switch alone in the console; it takes about
+6 minutes. On the beta the console is the only way: the command-line release is refused on the server by design
+(two-person rule). With a second operator, they approve instead of you waiting.
+
+1. **Know why it was engaged** before releasing: `scripts/beta.sh ops sentinel kill-switch` (actor, reason, version).
+   Actor `sentinel` ("systemic integrity breach …") means integrity refusals across merchants: read
+   `scripts/beta.sh ops sentinel integrity-breaches` and fix the cause first (IntegrityDriftSuspected: a provider format
+   change or config skew).
+2. Console (<https://ops.nearpay.money>) → **Kill switch** → **Request release**, with a reason.
+3. **Wait 5 minutes** (the single-operator delay). The console shows from when you can complete it.
+4. **Approve release**: log in to Cloudflare Access again when asked (a fresh confirmation is required after the wait),
+   and write a reason of **at least 20 characters**. Telegram sends a "single-operator action" notice.
+5. **Check, in this order** (within about a minute):
+   - `scripts/beta.sh ops rails flags`: `quoting_enabled` is `true` and its `source_version` equals sentinel's new
+     `version` (from `scripts/beta.sh ops sentinel kill-switch`). Still `false` after a minute: "Rails missed the
+     release" below.
+   - `scripts/beta.sh ops sentinel quarantines` is empty. Merchants quarantined during the incident stay held until
+     their quarantine expires (30 minutes after the last refusal); once you know it was not tampering:
+     `scripts/beta.sh ops sentinel quarantine-clear <acct_…> "<why>"` for each.
+   - `scripts/beta.sh routing` says ok.
+
+### Rails missed the release
+
+Sentinel says released, but rails' copy (`scripts/beta.sh ops rails flags`) still has `quoting_enabled = false` with an
+older `source_version`: the release event did not reach rails (KillSwitchCopyDiverged; often with ConsumerLagHigh or
+DeadLetters). Releasing again does not help.
+
+1. Wait a minute and run `scripts/beta.sh routing` again: rails with the periodic re-sync re-reads sentinel every 60 s.
+2. Still stale: `scripts/beta.sh logs rails-feeds | grep -i -E 'consumer|kill.switch'`. A stopped consumer picks up the
+   pending event after `docker restart nearpay-beta-rails-feeds-1`.
+3. Emergency override, only after checking sentinel really is released:
+   `scripts/beta.sh ops rails flag-set quoting_enabled true "sentinel released v<N>, rails missed the event"`.
+   It changes only the value and keeps `source_version`, so the next real kill-switch event from sentinel still wins
+   (a later engagement stops payments again, as it should). It works only while rails knows a state
+   (`kill_switch_engaged`), not for `kill_switch_unknown`.
 
 UptimeRobot alerts you separately when the site is unreachable from outside: check the Mac is awake, signed in and online; `scripts/beta.sh status` shows the rest ("Uptime").
 
