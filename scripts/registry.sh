@@ -50,7 +50,8 @@ need_node() {
 alive() { node "$lib" ping "$url"; }
 
 # Start time of a process: stored next to the pid, so a recycled pid is never taken for our Verdaccio.
-proc_start() { ps -p "$1" -o lstart= 2>/dev/null | tr -s ' ' || true; }
+# Trimmed at both ends: macOS ps pads the column, and `read` (own_pid) drops such padding from the stored copy.
+proc_start() { ps -p "$1" -o lstart= 2>/dev/null | tr -s ' ' | sed -e 's/^ *//' -e 's/ *$//' || true; }
 
 own_pid() { # prints the pid of the Verdaccio this script started, when it still runs
   local pid="" started=""
